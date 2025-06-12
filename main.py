@@ -58,6 +58,9 @@ def save_config(config):
         json.dump(config, f)
 
 class MidiGapperGUI(tk.Tk):
+    # Map MIDI note number to note name
+    NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+
     def __init__(self):
         super().__init__()
         self.title('Python Midi Gapper 2')
@@ -190,6 +193,9 @@ class MidiGapperGUI(tk.Tk):
             return f"{m:02d}:{s:05.3f}"
         def format_dur(sec):
             return f"{sec:05.3f}"
+        # Prepare visualization data
+        self.notes_for_visualization = []
+        # Build XML root
         root = ET.Element('MidiFile', ticks_per_beat=str(mf.ticks_per_beat))
         for i, track in enumerate(mf.tracks):
             tr_elem = ET.SubElement(root, 'Track', name=track.name or f'Track_{i}')
@@ -219,13 +225,13 @@ class MidiGapperGUI(tk.Tk):
                         start_elem, start_time = active_on.pop(key)
                         duration = abs_time - start_time
                         start_elem.set('duration', format_dur(duration))
+                        # Record raw note data for visualization
+                        self.notes_for_visualization.append({'start_time': start_time, 'note': key[1], 'channel': key[0], 'duration': duration})
         pretty_xml = minidom.parseString(ET.tostring(root, encoding='utf-8')).toprettyxml(indent="  ")
         self.text.insert('end', pretty_xml)
-        # Populate visualization notes from processed MIDI data
+        # Populate visualization notes from processed MIDI data (mido-based for accurate durations)
         self.notes = [(d['start_time'], d['note'], d['channel'], d['duration']) for d in self.notes_for_visualization]
-        # Compute max_time including durations
         self.max_time = max((d['start_time'] + d['duration'] for d in self.notes_for_visualization), default=1)
-        # Draw the visualization using collected data
         self.draw_visualization(self.notes, self.max_time)
 
     def load_midi_file(self):
@@ -273,28 +279,40 @@ class MidiGapperGUI(tk.Tk):
                 # Label C and octave number to right of the line in blue with larger font
                 octave = (note // 12) - 1
                 self.canvas.create_text(x + 2, 2, text=f"C{octave}", anchor='nw', fill='blue', font=self.vis_font)
-        # Draw each note scaled by duration
-        for time, note, channel, dur in notes:
+        # Draw each note scaled by duration with tooltip events
+        # Prepare for tooltips
+        self.rect_data = {}
+        prev_end = {}
+        # Sort notes by start time for gap calculation
+        for idx, (time, note, channel, dur) in enumerate(sorted(notes, key=lambda x: x[0])):
             # Calculate key index (0 to 87)
-            idx = note - 21
-            # Determine if the key is black (C#=1, D#=3, F#=6, G#=8, A#=10)
+            key_idx = note - 21
+            # Determine if the key is black
             semitone = note % 12
             is_black = semitone in {1, 3, 6, 8, 10}
-            # Set note width accordingly
             note_w = black_key_w if is_black else white_key_w
-            # X positions
-            x1 = idx * white_key_w
+            x1 = key_idx * white_key_w
             x2 = x1 + note_w
             # Y positions based on start time and duration
             y1 = height - (time    / max_time) * height * scale
             y2 = height - ((time + dur) / max_time) * height * scale
-            # Normalize order
-            y_top = min(y1, y2)
-            y_bot = max(y1, y2)
-            # Draw rounded rectangle (corners and center) with channel color
+            y_top, y_bot = min(y1, y2), max(y1, y2)
+            # Draw note rectangle with tag for events
+            # Define tag and color for this note
+            tag = f"note_{idx}"
             color = self.channel_colors.get(channel, '#cccccc')
-            self.canvas.create_rectangle(x1+radius, y_top, x2-radius, y_bot, fill=color, outline='')
-            self.canvas.create_rectangle(x1, y_top+radius, x2, y_bot-radius, fill=color, outline='')
+            # Emulate rounded corners: draw two overlapping rectangles with corner radius
+            self.canvas.create_rectangle(x1+radius, y_top, x2-radius, y_bot, fill=color, outline='', tags=(tag,))
+            self.canvas.create_rectangle(x1, y_top+radius, x2, y_bot-radius, fill=color, outline='', tags=(tag,))
+            # Calculate gap from previous same note
+            prev = prev_end.get(note)
+            gap = time - prev if prev is not None else None
+            prev_end[note] = time + dur
+            # Store data for tooltip
+            self.rect_data[tag] = {'note': note, 'start': time, 'dur': dur, 'gap': gap}
+            # Bind hover events
+            self.canvas.tag_bind(tag, '<Enter>', lambda e, t=tag: self.on_note_enter(e, t))
+            self.canvas.tag_bind(tag, '<Leave>', lambda e: self.on_note_leave(e))
         # Update scroll region to encompass all notes
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
         # Auto-scroll to bottom (latest notes at top of canvas)
@@ -324,6 +342,9 @@ class MidiGapperGUI(tk.Tk):
                             if abs_str:
                                 m,s = abs_str.split(':'); start = int(m)*60 + float(s)
                                 dur = float(dur_str) if dur_str is not None else 0.0
+                                # skip zero or negative durations
+                                if dur <= 0:
+                                    continue
                                 note = int(msg_elem.get('note','0')); ch = int(msg_elem.get('channel','0'))
                                 notes.append((start, note, ch, dur))
                 # Update notes and rescale
@@ -368,6 +389,31 @@ class MidiGapperGUI(tk.Tk):
         if hasattr(self, 'tooltip_window') and self.tooltip_window:
             self.tooltip_window.destroy()
             self.tooltip_window = None
+
+    def note_number_to_name(self, note):
+        # Convert MIDI note number to name with octave
+        name = self.NOTE_NAMES[note % 12]
+        octave = note // 12 - 1
+        return f"{name}{octave}"
+
+    def on_note_enter(self, event, tag):
+        data = self.rect_data.get(tag, {})
+        note = data.get('note')
+        start = data.get('start')
+        dur = data.get('dur')
+        gap = data.get('gap')
+        # Format times
+        mins, secs = divmod(start, 60)
+        start_str = f"{int(mins):02d}:{secs:05.3f}"
+        dur_str = f"{dur:0.3f}s"
+        gap_str = f"{gap:0.3f}s" if gap is not None else "NA"
+        note_name = self.note_number_to_name(note)
+        text = f"Note: {note_name}\nStart: {start_str}\nDuration: {dur_str}\nGap: {gap_str}"
+        # Show tooltip at mouse position
+        self.show_tooltip(event.x_root, event.y_root, text)
+
+    def on_note_leave(self, event):
+        self.hide_tooltip()
 
 if __name__ == '__main__':
     app = MidiGapperGUI()
