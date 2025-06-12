@@ -62,6 +62,11 @@ class MidiGapperGUI(tk.Tk):
         self.title('Python Midi Gapper 2')
         # Load window geometry
         self.config_data = load_config()
+        # Default tempo in microseconds per quarter note
+        self.tempo_us = 500000
+        # Y-scale multiplier for visualization
+        y_scale = self.config_data.get('y_scale', 1.0)
+        self.y_scale_var = tk.DoubleVar(value=y_scale)
         geometry = self.config_data.get('geometry')
         if geometry:
             self.geometry(geometry)
@@ -101,6 +106,14 @@ class MidiGapperGUI(tk.Tk):
         # Visualization tab
         vis_frame = ttk.Frame(notebook)
         notebook.add(vis_frame, text='Visualization')
+        # Y-scale control above visualization
+        scale_frame = ttk.Frame(vis_frame)
+        scale_frame.pack(side='top', fill='x', padx=5, pady=(0,5))
+        ttk.Label(scale_frame, text='Y-Scale:').pack(side='left')
+        y_entry = ttk.Entry(scale_frame, textvariable=self.y_scale_var, width=5)
+        y_entry.pack(side='left')
+        # Redraw visualization when Y-scale changes
+        self.y_scale_var.trace_add('write', lambda *args: self.draw_visualization(self.notes, self.max_time))
         # Container for canvas and scrollbar
         canvas_container = ttk.Frame(vis_frame)
         canvas_container.pack(fill='both', expand=True)
@@ -137,6 +150,15 @@ class MidiGapperGUI(tk.Tk):
         # Load MIDI data
         self.current_midi_file = file_path
         self.midi_data = MidiFile(file_path)
+        # Capture initial tempo from first set_tempo meta message if present
+        for track in self.midi_data.tracks:
+            for msg in track:
+                if msg.is_meta and msg.type == 'set_tempo':
+                    self.tempo_us = msg.tempo
+                    break
+            else:
+                continue
+            break
         mf = self.midi_data
         # Determine instruments per channel from program_change messages
         self.channel_instruments.clear()
@@ -149,44 +171,49 @@ class MidiGapperGUI(tk.Tk):
         for idx, ch in enumerate(channels):
             self.channel_colors[ch] = DEFAULT_CHANNEL_COLORS[idx % len(DEFAULT_CHANNEL_COLORS)]
         self.update_channel_legend()
-        # XML conversion
+        # XML conversion with absolute time and duration for notes
+        def format_abs(sec):
+            m = int(sec // 60)
+            s = sec - m*60
+            return f"{m:02d}:{s:05.3f}"
+        def format_dur(sec):
+            return f"{sec:05.3f}"
         root = ET.Element('MidiFile', ticks_per_beat=str(mf.ticks_per_beat))
         for i, track in enumerate(mf.tracks):
             tr_elem = ET.SubElement(root, 'Track', name=track.name or f'Track_{i}')
+            abs_time = 0.0
+            tempo = 500000
+            active_on = {}
             for msg in track:
+                # accumulate real time
+                delta = mido.tick2second(msg.time, mf.ticks_per_beat, tempo)
+                abs_time += delta
+                if msg.is_meta and msg.type == 'set_tempo':
+                    tempo = msg.tempo
                 attrs = msg.dict()
                 msg_elem = ET.SubElement(tr_elem, 'Message', type=msg.type, time=str(msg.time))
+                # set standard attributes
                 for attr, value in attrs.items():
                     if attr not in ('type', 'time'):
                         msg_elem.set(attr, str(value))
+                # note_on: record absolute time
+                if msg.type == 'note_on' and getattr(msg, 'velocity', 0) > 0:
+                    active_on[(msg.channel, msg.note)] = (msg_elem, abs_time)
+                    msg_elem.set('abs_time', format_abs(abs_time))
+                # note_off: calculate duration
+                elif msg.type == 'note_off' or (msg.type == 'note_on' and getattr(msg, 'velocity', 0) == 0):
+                    key = (getattr(msg, 'channel', None), getattr(msg, 'note', None))
+                    if key in active_on:
+                        start_elem, start_time = active_on.pop(key)
+                        duration = abs_time - start_time
+                        start_elem.set('duration', format_dur(duration))
         pretty_xml = minidom.parseString(ET.tostring(root, encoding='utf-8')).toprettyxml(indent="  ")
         self.text.insert('end', pretty_xml)
-        # Build detailed visualization data (start, duration, velocity)
-        self.notes_for_visualization.clear()
-        active_notes = {}
-        for track in mf.tracks:
-            abs_time = 0.0
-            tempo = 500000
-            for msg in track:
-                abs_time += mido.tick2second(msg.time, mf.ticks_per_beat, tempo)
-                if msg.is_meta and msg.type == 'set_tempo':
-                    tempo = msg.tempo
-                if hasattr(msg, 'channel') and msg.type == 'note_on' and msg.velocity > 0:
-                    active_notes[(msg.channel, msg.note)] = {'start': abs_time, 'velocity': msg.velocity}
-                elif hasattr(msg, 'channel') and (msg.type == 'note_off' or (msg.type == 'note_on' and msg.velocity == 0)):
-                    key = (msg.channel, msg.note)
-                    if key in active_notes:
-                        info = active_notes.pop(key)
-                        duration = abs_time - info['start']
-                        self.notes_for_visualization.append({
-                            'channel': key[0], 'note': key[1],
-                            'start_time': info['start'], 'duration': duration,
-                            'velocity': info['velocity']
-                        })
-        # Prepare notes for drawing
-        self.notes = [(d['start_time'], d['note'], d['channel']) for d in self.notes_for_visualization]
+        # Populate visualization notes from processed MIDI data
+        self.notes = [(d['start_time'], d['note'], d['channel'], d['duration']) for d in self.notes_for_visualization]
         # Compute max_time including durations
         self.max_time = max((d['start_time'] + d['duration'] for d in self.notes_for_visualization), default=1)
+        # Draw the visualization using collected data
         self.draw_visualization(self.notes, self.max_time)
 
     def load_midi_file(self):
@@ -199,82 +226,34 @@ class MidiGapperGUI(tk.Tk):
             save_config(self.config_data)
             self.process_midi(file_path)
 
-    def save_gapped_midi(self):
-        """Save the current MIDI file, applying gap modifications and excluding deleted channels."""
-        if not self.midi_data or not self.current_midi_file:
-            messagebox.showerror("Error", "No MIDI file loaded to save.")
-            return
-        save_path = filedialog.asksaveasfilename(
-            initialfile=os.path.splitext(os.path.basename(self.current_midi_file))[0] + '_gapped.mid',
-            defaultextension='.mid', filetypes=[('MIDI files', '*.mid')], title='Save MIDI File'
-        )
-        if not save_path:
-            return
-        try:
-            if not self.modifications_applied and not self.deleted_channels:
-                shutil.copyfile(self.current_midi_file, save_path)
-                messagebox.showinfo("Save Complete", f"MIDI saved to {save_path}")
-                return
-            new_midi = MidiFile(type=self.midi_data.type, ticks_per_beat=self.midi_data.ticks_per_beat)
-            active_channels = set(range(16)) - self.deleted_channels
-            # Build modification map
-            mod_map = {}
-            for note in self.notes_for_visualization:
-                if note['channel'] in active_channels:
-                    key = (note['channel'], note['note'], round(note['start_time'],8), note['velocity'])
-                    mod_map[key] = note['duration']
-            max_end = 0.0
-            for track in self.midi_data.tracks:
-                new_track = MidiTrack()
-                new_midi.tracks.append(new_track)
-                abs_time = 0.0; tempo=500000; active={}; pending=[]
-                for msg in track:
-                    delta = mido.tick2second(msg.time, self.midi_data.ticks_per_beat, tempo)
-                    abs_time += delta
-                    if msg.is_meta and msg.type=='set_tempo': tempo=msg.tempo
-                    if hasattr(msg,'channel') and msg.channel not in active_channels: continue
-                    entry={'msg':msg,'abs':abs_time,'mod':None}
-                    pending.append(entry)
-                    if msg.type=='note_on' and msg.velocity>0:
-                        active[(msg.channel,msg.note)]={'start':abs_time,'velocity':msg.velocity}
-                    elif msg.type in ('note_off','note_on') and msg.velocity==0:
-                        key=(msg.channel,msg.note)
-                        if key in active:
-                            start=active.pop(key)['start']
-                            mod_key=(key[0],key[1],round(start,8),entry['msg'].velocity)
-                            if mod_key in mod_map:
-                                entry['mod']=start+mod_map[mod_key]
-                                max_end=max(max_end, entry['mod'])
-                # write new track
-                abs_new=0.0; tempo=500000
-                for e in pending:
-                    msg=e['msg']; tgt=e['mod'] or e['abs']
-                    if msg.is_meta and msg.type=='set_tempo': tempo=msg.tempo
-                    delta_s=max(0,tgt-abs_new)
-                    dt=int(round(mido.second2tick(delta_s,self.midi_data.ticks_per_beat,tempo)))
-                    new_track.append(msg.copy(time=dt)); abs_new+=delta_s
-                # end of track
-                if new_track and new_track[-1].is_meta and new_track[-1].type=='end_of_track': new_track.pop()
-                pad = max(0, max_end-abs_new+0.01)
-                new_track.append(mido.MetaMessage('end_of_track',time=int(round(mido.second2tick(pad,self.midi_data.ticks_per_beat,tempo)))))
-            new_midi.tracks=[t for t in new_midi.tracks if len(t)>1 or (len(t)==1 and not t[0].is_meta)]
-            new_midi.save(save_path)
-            messagebox.showinfo("Save Complete", f"MIDI saved to {save_path}")
-        except Exception as e:
-            messagebox.showerror("Save Error", f"Failed to save MIDI:\n{e}\n{traceback.format_exc()}")
-
     def draw_visualization(self, notes, max_time):
         self.canvas.delete('all')
         self.canvas.update_idletasks()
+        # Get Y-scale multiplier
+        scale = self.y_scale_var.get()
         width = self.canvas.winfo_width()
         height = self.canvas.winfo_height()
-        # Dimensions for keys: white and black key widths, note height, and corner radius
+        # Dimensions for keys: white and black key widths
         white_key_w = width / 88
         black_key_w = white_key_w * 0.75
-        note_h = 10
-        radius = 4
-        # Draw each note
-        for time, note, channel in notes:
+        radius = 2  # corner radius
+        # Draw measure lines (assume 4/4 time)
+        # seconds per quarter note from initial tempo
+        spqn = self.tempo_us / 1e6
+        meas_dur = 4 * spqn
+        num_measures = int(max_time // meas_dur) + 1
+        for m in range(1, num_measures + 1):
+            t = m * meas_dur
+            y = height - (t / max_time) * height * scale
+            self.canvas.create_line(0, y, width, y, fill='#444')
+        # Draw octave lines before each C key
+        for note in range(21, 109):
+            if note % 12 == 0:
+                idx = note - 21
+                x = idx * white_key_w
+                self.canvas.create_line(x, 0, x, height, fill='#444')
+        # Draw each note scaled by duration
+        for time, note, channel, dur in notes:
             # Calculate key index (0 to 87)
             idx = note - 21
             # Determine if the key is black (C#=1, D#=3, F#=6, G#=8, A#=10)
@@ -282,22 +261,19 @@ class MidiGapperGUI(tk.Tk):
             is_black = semitone in {1, 3, 6, 8, 10}
             # Set note width accordingly
             note_w = black_key_w if is_black else white_key_w
-            # X center: place each key evenly across the canvas
-            x_center = (idx + 0.5) * white_key_w
-            # Y position by time
-            y_center = height - (time / max_time) * height
-            x1 = x_center - note_w / 2
-            y1 = y_center - note_h / 2
-            x2 = x_center + note_w / 2
-            y2 = y_center + note_h / 2
+            # X positions
+            x1 = idx * white_key_w
+            x2 = x1 + note_w
+            # Y positions based on start time and duration
+            y1 = height - (time    / max_time) * height * scale
+            y2 = height - ((time + dur) / max_time) * height * scale
+            # Normalize order
+            y_top = min(y1, y2)
+            y_bot = max(y1, y2)
             # Draw rounded rectangle (corners and center) with channel color
             color = self.channel_colors.get(channel, '#cccccc')
-            self.canvas.create_rectangle(x1+radius, y1, x2-radius, y2, fill=color, outline='')
-            self.canvas.create_rectangle(x1, y1+radius, x2, y2-radius, fill=color, outline='')
-            self.canvas.create_oval(x1, y1, x1+2*radius, y1+2*radius, fill=color, outline='')
-            self.canvas.create_oval(x2-2*radius, y1, x2, y1+2*radius, fill=color, outline='')
-            self.canvas.create_oval(x1, y2-2*radius, x1+2*radius, y2, fill=color, outline='')
-            self.canvas.create_oval(x2-2*radius, y2-2*radius, x2, y2, fill=color, outline='')
+            self.canvas.create_rectangle(x1+radius, y_top, x2-radius, y_bot, fill=color, outline='')
+            self.canvas.create_rectangle(x1, y_top+radius, x2, y_bot-radius, fill=color, outline='')
         # Update scroll region to encompass all notes
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
         # Auto-scroll to bottom (latest notes at top of canvas)
@@ -318,25 +294,26 @@ class MidiGapperGUI(tk.Tk):
                     root = ET.fromstring(xml_str)
                 except Exception:
                     return
-                # Build notes from XML with cumulative times per track
+                # Build notes from XML: include start time and duration
                 notes = []
                 for tr in root.findall('Track'):
-                    cumulative = 0
                     for msg_elem in tr.findall('Message'):
-                        dt = int(msg_elem.get('time', '0'))
-                        cumulative += dt
-                        if msg_elem.get('type') == 'note_on' and int(msg_elem.get('velocity', '0')) > 0:
-                            note = int(msg_elem.get('note', '0'))
-                            ch = int(msg_elem.get('channel', '0'))
-                            notes.append((cumulative, note, ch))
-                # Store notes and max_time then redraw
+                        if msg_elem.get('type') == 'note_on' and int(msg_elem.get('velocity','0'))>0:
+                            abs_str = msg_elem.get('abs_time'); dur_str = msg_elem.get('duration')
+                            if abs_str:
+                                m,s = abs_str.split(':'); start = int(m)*60 + float(s)
+                                dur = float(dur_str) if dur_str is not None else 0.0
+                                note = int(msg_elem.get('note','0')); ch = int(msg_elem.get('channel','0'))
+                                notes.append((start, note, ch, dur))
+                # Update notes and rescale
                 self.notes = notes
-                self.max_time = max((t for t, *_ in notes), default=1)
+                self.max_time = max((t+d for t,_,_,d in notes), default=1)
                 self.draw_visualization(self.notes, self.max_time)
 
     def on_closing(self):
-        # Save window geometry
+        # Save window geometry and Y-scale
         self.config_data['geometry'] = self.geometry()
+        self.config_data['y_scale'] = self.y_scale_var.get()
         save_config(self.config_data)
         self.destroy()
 
