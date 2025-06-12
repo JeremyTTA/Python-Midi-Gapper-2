@@ -10,6 +10,7 @@ import shutil
 import traceback
 from tkinter import messagebox
 from mido import MidiFile, MidiTrack
+import tkinter.font as tkfont
 
 # Predefined distinct colors for channels
 DEFAULT_CHANNEL_COLORS = [
@@ -80,6 +81,10 @@ class MidiGapperGUI(tk.Tk):
         self.max_time = 1
         # Create UI
         self.create_widgets()
+        # Define visualization text font as double the default size in blue
+        default_font = tkfont.nametofont("TkDefaultFont")
+        new_size = default_font.cget("size") * 2
+        self.vis_font = tkfont.Font(family=default_font.cget("family"), size=new_size)
         # Initialize channel-color and instrument mapping
         self.channel_colors = {}
         self.channel_instruments = {}
@@ -126,6 +131,13 @@ class MidiGapperGUI(tk.Tk):
         self.canvas.configure(yscrollcommand=v_scroll.set)
         # Redraw visualization on canvas resize (fix autoload sizing issues)
         self.canvas.bind('<Configure>', lambda e: self.draw_visualization(self.notes, self.max_time))
+        # Enable scrolling of visualization with mouse wheel and arrow keys
+        self.canvas.bind('<Enter>', lambda e: self.canvas.focus_set())
+        # Increase scroll speed by using a multiplier for faster scrolling
+        scroll_factor = 20
+        self.bind_all('<MouseWheel>', lambda e: self.canvas.yview_scroll(-scroll_factor * int(e.delta/120), 'units'))
+        self.bind_all('<Up>', lambda e: self.canvas.yview_scroll(-scroll_factor, 'units'))
+        self.bind_all('<Down>', lambda e: self.canvas.yview_scroll(scroll_factor, 'units'))
 
         # Text screen tab
         text_frame = ttk.Frame(notebook)
@@ -246,12 +258,21 @@ class MidiGapperGUI(tk.Tk):
             t = m * meas_dur
             y = height - (t / max_time) * height * scale
             self.canvas.create_line(0, y, width, y, fill='#444')
+            # Label time, measure number, and tempo just above the line in blue with larger font
+            minutes = int(t // 60)
+            seconds = t % 60
+            time_str = f"{minutes:02d}:{seconds:05.3f}"
+            bpm = int(round(60e6 / self.tempo_us))
+            self.canvas.create_text(2, y - 6, text=f"{time_str} M{m} BPM{bpm}", anchor='nw', fill='blue', font=self.vis_font)
         # Draw octave lines before each C key
         for note in range(21, 109):
             if note % 12 == 0:
                 idx = note - 21
                 x = idx * white_key_w
                 self.canvas.create_line(x, 0, x, height, fill='#444')
+                # Label C and octave number to right of the line in blue with larger font
+                octave = (note // 12) - 1
+                self.canvas.create_text(x + 2, 2, text=f"C{octave}", anchor='nw', fill='blue', font=self.vis_font)
         # Draw each note scaled by duration
         for time, note, channel, dur in notes:
             # Calculate key index (0 to 87)
@@ -332,6 +353,21 @@ class MidiGapperGUI(tk.Tk):
             dot.pack(side='left', padx=(0,4))
             lbl = ttk.Label(item, text=f'Ch {ch}: {instr}', foreground=color)
             lbl.pack(side='left')
+
+    # Tooltip window
+    def show_tooltip(self, x, y, text):
+        # create tooltip window at (x, y)
+        self.hide_tooltip()
+        self.tooltip_window = tk.Toplevel(self)
+        self.tooltip_window.wm_overrideredirect(True)
+        self.tooltip_window.wm_geometry(f"+{x+10}+{y+10}")
+        label = tk.Label(self.tooltip_window, text=text, justify='left', background='lightyellow', relief='solid', borderwidth=1)
+        label.pack()
+
+    def hide_tooltip(self):
+        if hasattr(self, 'tooltip_window') and self.tooltip_window:
+            self.tooltip_window.destroy()
+            self.tooltip_window = None
 
 if __name__ == '__main__':
     app = MidiGapperGUI()
