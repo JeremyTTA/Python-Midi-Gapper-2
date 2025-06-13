@@ -64,12 +64,6 @@ class MidiGapperGUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title('Python Midi Gapper 2')
-        # Create a menu bar with File -> Load MIDI File
-        menu_bar = tk.Menu(self)
-        file_menu = tk.Menu(menu_bar, tearoff=0)
-        file_menu.add_command(label='Load MIDI File', command=self.load_midi_file)
-        menu_bar.add_cascade(label='File', menu=file_menu)
-        self.config(menu=menu_bar)
         # Load window geometry
         self.config_data = load_config()
         # Default tempo in microseconds per quarter note
@@ -88,15 +82,11 @@ class MidiGapperGUI(tk.Tk):
         self.notes_for_visualization = []
         self.notes = []
         self.max_time = 1
-        # Variables for channel visibility checkboxes
-        self.channel_vars = {}
-        # Scroll control: flag to scroll to bottom on next draw
-        self.scroll_to_bottom_on_next_draw = False
         # Create UI
         self.create_widgets()
-        # Define visualization text font with default size for clarity
+        # Define visualization text font as double the default size in blue
         default_font = tkfont.nametofont("TkDefaultFont")
-        new_size = default_font.cget("size")  # use standard size
+        new_size = default_font.cget("size") * 2
         self.vis_font = tkfont.Font(family=default_font.cget("family"), size=new_size)
         # Initialize channel-color and instrument mapping
         self.channel_colors = {}
@@ -109,17 +99,13 @@ class MidiGapperGUI(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def create_widgets(self):
-        # Header frame containing midi info
-        header_frame = ttk.Frame(self)
-        header_frame.pack(side='top', fill='x')
-        # MIDI info display
-        self.midi_info_var = tk.StringVar(value='')
-        info_label = ttk.Label(header_frame, textvariable=self.midi_info_var, anchor='center')
-        info_label.pack(side='left', expand=True)
+        # Load MIDI button at top
+        load_btn = ttk.Button(self, text='Load MIDI File', command=self.load_midi_file)
+        load_btn.pack(side='top', anchor='w', padx=5, pady=5)
 
-        # Channel legend at top
-        self.channel_frame = ttk.LabelFrame(header_frame, text='Channels')
-        self.channel_frame.pack(side='right', anchor='ne', padx=5, pady=5)
+        # Channel legend at top-right
+        self.channel_frame = ttk.LabelFrame(self, text='Channels')
+        self.channel_frame.pack(side='top', anchor='ne', padx=5, pady=5)
 
         # Notebook for tabs at bottom
         notebook = ttk.Notebook(self)
@@ -199,8 +185,6 @@ class MidiGapperGUI(tk.Tk):
         channels = sorted({msg.channel for track in mf.tracks for msg in track if hasattr(msg, 'channel')})
         for idx, ch in enumerate(channels):
             self.channel_colors[ch] = DEFAULT_CHANNEL_COLORS[idx % len(DEFAULT_CHANNEL_COLORS)]
-        # Track visibility: show all channels by default
-        self.visible_channels = set(channels)
         self.update_channel_legend()
         # XML conversion with absolute time and duration for notes
         def format_abs(sec):
@@ -248,19 +232,7 @@ class MidiGapperGUI(tk.Tk):
         # Populate visualization notes from processed MIDI data (mido-based for accurate durations)
         self.notes = [(d['start_time'], d['note'], d['channel'], d['duration']) for d in self.notes_for_visualization]
         self.max_time = max((d['start_time'] + d['duration'] for d in self.notes_for_visualization), default=1)
-        # Update the MIDI info label with all tempo changes
-        # Convert tempo_changes (microseconds per quarter note) to BPM list
-        tempos_us = [msg.tempo for track in mf.tracks for msg in track if msg.is_meta and msg.type == 'set_tempo']
-        if not tempos_us:
-            tempos_us = [self.tempo_us]
-        tempos_bpm = [str(int(round(60e6/t))) for t in tempos_us]
-        tempo_str = ','.join(tempos_bpm)
-        fname = os.path.basename(file_path)
-        # Show only filename and track count in header
-        self.midi_info_var.set(f"{fname} | Tracks: {len(mf.tracks)}")
         self.draw_visualization(self.notes, self.max_time)
-        # Schedule scroll to bottom on next visualization
-        self.scroll_to_bottom_on_next_draw = True
 
     def load_midi_file(self):
         file_path = filedialog.askopenfilename(
@@ -279,14 +251,6 @@ class MidiGapperGUI(tk.Tk):
         scale = self.y_scale_var.get()
         width = self.canvas.winfo_width()
         height = self.canvas.winfo_height()
-        # compute total drawing height (scrollable) based on scale
-        total_height = height * scale
-        # clear and configure scrollregion early so coordinates map correctly
-        self.canvas.configure(scrollregion=(0, 0, width, total_height))
-        # Perform scroll to bottom if requested
-        if getattr(self, 'scroll_to_bottom_on_next_draw', False):
-            self.canvas.yview_moveto(1.0)
-            self.scroll_to_bottom_on_next_draw = False
         # Dimensions for keys: white and black key widths
         white_key_w = width / 88
         black_key_w = white_key_w * 0.75
@@ -298,22 +262,20 @@ class MidiGapperGUI(tk.Tk):
         num_measures = int(max_time // meas_dur) + 1
         for m in range(1, num_measures + 1):
             t = m * meas_dur
-            # map time to Y in total_height space (0 at top)
-            y = total_height - (t / max_time) * total_height
+            y = height - (t / max_time) * height * scale
             self.canvas.create_line(0, y, width, y, fill='#444')
             # Label time, measure number, and tempo just above the line in blue with larger font
             minutes = int(t // 60)
             seconds = t % 60
             time_str = f"{minutes:02d}:{seconds:05.3f}"
             bpm = int(round(60e6 / self.tempo_us))
-            self.canvas.create_text(6, y - 14, text=f"{time_str} M{m} BPM{bpm}", anchor='nw', fill='white', font=self.vis_font)
+            self.canvas.create_text(2, y - 6, text=f"{time_str} M{m} BPM{bpm}", anchor='nw', fill='blue', font=self.vis_font)
         # Draw octave lines before each C key
         for note in range(21, 109):
             if note % 12 == 0:
                 idx = note - 21
                 x = idx * white_key_w
-                # draw vertical lines spanning full scrollable region
-                self.canvas.create_line(x, 0, x, total_height, fill='#444')
+                self.canvas.create_line(x, 0, x, height, fill='#444')
                 # Label C and octave number to right of the line in blue with larger font
                 octave = (note // 12) - 1
                 self.canvas.create_text(x + 2, 2, text=f"C{octave}", anchor='nw', fill='blue', font=self.vis_font)
@@ -323,9 +285,6 @@ class MidiGapperGUI(tk.Tk):
         prev_end = {}
         # Sort notes by start time for gap calculation
         for idx, (time, note, channel, dur) in enumerate(sorted(notes, key=lambda x: x[0])):
-            # Skip drawing notes for channels that are not visible
-            if channel not in self.visible_channels:
-                continue
             # Calculate key index (0 to 87)
             key_idx = note - 21
             # Determine if the key is black
@@ -335,9 +294,8 @@ class MidiGapperGUI(tk.Tk):
             x1 = key_idx * white_key_w
             x2 = x1 + note_w
             # Y positions based on start time and duration
-            # map note times to Y positions
-            y1 = total_height - (time          / max_time) * total_height
-            y2 = total_height - ((time + dur)  / max_time) * total_height
+            y1 = height - (time    / max_time) * height * scale
+            y2 = height - ((time + dur) / max_time) * height * scale
             y_top, y_bot = min(y1, y2), max(y1, y2)
             # Draw note rectangle with tag for events
             # Define tag and color for this note
@@ -355,7 +313,10 @@ class MidiGapperGUI(tk.Tk):
             # Bind hover events
             self.canvas.tag_bind(tag, '<Enter>', lambda e, t=tag: self.on_note_enter(e, t))
             self.canvas.tag_bind(tag, '<Leave>', lambda e: self.on_note_leave(e))
-        # Do not auto-scroll to bottom to preserve user scroll position
+        # Update scroll region to encompass all notes
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        # Auto-scroll to bottom (latest notes at top of canvas)
+        self.canvas.yview_moveto(1.0)
 
     def on_text_modified(self, event):
         # Reset modified flag
@@ -402,63 +363,17 @@ class MidiGapperGUI(tk.Tk):
         # Clear existing legend
         for child in self.channel_frame.winfo_children():
             child.destroy()
-        # Create legend items per channel with visibility checkbox
+        # Create legend items per channel
         for ch, color in sorted(self.channel_colors.items()):
             program = self.channel_instruments.get(ch, 0)
             instr = GM_INSTRUMENTS[program] if program < len(GM_INSTRUMENTS) else 'Unknown'
             item = tk.Frame(self.channel_frame)
+            # Pack items vertically
             item.pack(side='top', anchor='w', pady=2)
-            # Checkbox for visibility
-            var = self.channel_vars.get(ch)
-            if var is None:
-                var = tk.BooleanVar(value=(ch in self.visible_channels))
-                self.channel_vars[ch] = var
-            cb = tk.Checkbutton(item, variable=var, command=lambda ch=ch: self.toggle_channel(ch))
-            # Color indicator and label will be alongside checkbox
             dot = tk.Canvas(item, width=12, height=12, bg=color, highlightthickness=0)
+            dot.pack(side='left', padx=(0,4))
             lbl = ttk.Label(item, text=f'Ch {ch}: {instr}', foreground=color)
-            # Pack widgets
-            cb.pack(side='left')
-            dot.pack(side='left', padx=(4,4))
             lbl.pack(side='left')
-            # Define click handlers
-            def on_left(e, ch=ch, var=var):
-                var.set(not var.get())
-                self.toggle_channel(ch)
-            def on_right(e, ch=ch, var=var):
-                self.select_only_channel(ch)
-            # Bind left-click and right-click on row frame, dot, and label only (checkbox handles its own toggle)
-            for widget in (item, dot, lbl):
-                widget.bind('<Button-1>', on_left)
-                widget.bind('<Button-3>', on_right)
-            # Checkbox right-click selects only this channel
-            cb.bind('<Button-3>', on_right)
-
-    def toggle_channel(self, ch):
-        # Update visibility set based on checkbox and redraw
-        if self.channel_vars[ch].get():
-            self.visible_channels.add(ch)
-        else:
-            self.visible_channels.discard(ch)
-        self.draw_visualization(self.notes, self.max_time)
-
-    def select_only_channel(self, ch):
-        # If this channel is already the only visible one, toggle to show all channels
-        all_channels = set(self.channel_vars.keys())
-        if self.visible_channels == {ch}:
-            for c, var in self.channel_vars.items():
-                var.set(True)
-            self.visible_channels = set(all_channels)
-        else:
-            # Otherwise, select only this channel and uncheck others
-            for c, var in self.channel_vars.items():
-                if c == ch:
-                    var.set(True)
-                else:
-                    var.set(False)
-            self.visible_channels = {ch}
-        # Redraw visualization with updated visibility
-        self.draw_visualization(self.notes, self.max_time)
 
     # Tooltip window
     def show_tooltip(self, x, y, text):
@@ -499,18 +414,6 @@ class MidiGapperGUI(tk.Tk):
 
     def on_note_leave(self, event):
         self.hide_tooltip()
-
-    def get_current_tempo(self, t):
-        """
-        Return the tempo (in microseconds per quarter note) active at time t (seconds).
-        """
-        tempo = self.tempo_changes[0][1] if hasattr(self, 'tempo_changes') and self.tempo_changes else self.tempo_us
-        for change_time, change_tempo in self.tempo_changes:
-            if change_time <= t:
-                tempo = change_tempo
-            else:
-                break
-        return tempo
 
 if __name__ == '__main__':
     app = MidiGapperGUI()
