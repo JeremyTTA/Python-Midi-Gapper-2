@@ -100,12 +100,23 @@ class MidiGapperGUI(tk.Tk):
         self.vis_font = tkfont.Font(family=default_font.cget("family"), size=new_size)
         # Initialize channel-color and instrument mapping
         self.channel_colors = {}
-        self.channel_instruments = {}
-        # Autoload last MIDI file if available
+        self.channel_instruments = {}        # Autoload last MIDI file if available
         last = self.config_data.get('last_midi')
         if last and os.path.exists(last):
-            # Delay autoload until GUI is idle so layout is complete
-            self.after_idle(lambda: self.process_midi(last))
+            # Delay autoload until GUI is complete and force scroll to bottom
+            def delayed_autoload():
+                self.process_midi(last)
+                # Force scroll to bottom with multiple attempts to ensure it sticks
+                def force_scroll():
+                    if self.canvas.winfo_width() > 1:  # ensure canvas is sized
+                        self.canvas.yview_moveto(1.0)
+                        print(f"Scrolled to bottom, yview: {self.canvas.canvasy(0)}")
+                    else:
+                        self.after(100, force_scroll)  # retry if not ready
+                self.after(100, force_scroll)
+                self.after(300, force_scroll)
+                self.after(500, force_scroll)
+            self.after_idle(delayed_autoload)
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def create_widgets(self):
@@ -145,9 +156,12 @@ class MidiGapperGUI(tk.Tk):
         # Vertical scrollbar for visualization
         v_scroll = ttk.Scrollbar(canvas_container, orient='vertical', command=self.canvas.yview)
         v_scroll.pack(fill='y', side='right')
-        self.canvas.configure(yscrollcommand=v_scroll.set)
-        # Redraw visualization on canvas resize (fix autoload sizing issues)
-        self.canvas.bind('<Configure>', lambda e: self.draw_visualization(self.notes, self.max_time))
+        self.canvas.configure(yscrollcommand=v_scroll.set)        # Redraw visualization on canvas resize (fix autoload sizing issues)
+        def on_canvas_configure(event):
+            # Don't scroll to bottom on resize events, only on initial load
+            if hasattr(self, 'notes') and self.notes:
+                self.draw_visualization(self.notes, self.max_time)
+        self.canvas.bind('<Configure>', on_canvas_configure)
         # Enable scrolling of visualization with mouse wheel and arrow keys
         self.canvas.bind('<Enter>', lambda e: self.canvas.focus_set())
         # Increase scroll speed by using a multiplier for faster scrolling
@@ -258,9 +272,9 @@ class MidiGapperGUI(tk.Tk):
         fname = os.path.basename(file_path)
         # Show only filename and track count in header
         self.midi_info_var.set(f"{fname} | Tracks: {len(mf.tracks)}")
-        self.draw_visualization(self.notes, self.max_time)
-        # Schedule scroll to bottom on next visualization
+        # Draw visualization and request scroll-to-bottom
         self.scroll_to_bottom_on_next_draw = True
+        self.draw_visualization(self.notes, self.max_time)
 
     def load_midi_file(self):
         file_path = filedialog.askopenfilename(
@@ -278,15 +292,10 @@ class MidiGapperGUI(tk.Tk):
         # Get Y-scale multiplier
         scale = self.y_scale_var.get()
         width = self.canvas.winfo_width()
-        height = self.canvas.winfo_height()
-        # compute total drawing height (scrollable) based on scale
+        height = self.canvas.winfo_height()        # compute total drawing height (scrollable) based on scale
         total_height = height * scale
         # clear and configure scrollregion early so coordinates map correctly
         self.canvas.configure(scrollregion=(0, 0, width, total_height))
-        # Perform scroll to bottom if requested
-        if getattr(self, 'scroll_to_bottom_on_next_draw', False):
-            self.canvas.yview_moveto(1.0)
-            self.scroll_to_bottom_on_next_draw = False
         # Dimensions for keys: white and black key widths
         white_key_w = width / 88
         black_key_w = white_key_w * 0.75
@@ -354,8 +363,12 @@ class MidiGapperGUI(tk.Tk):
             self.rect_data[tag] = {'note': note, 'start': time, 'dur': dur, 'gap': gap}
             # Bind hover events
             self.canvas.tag_bind(tag, '<Enter>', lambda e, t=tag: self.on_note_enter(e, t))
-            self.canvas.tag_bind(tag, '<Leave>', lambda e: self.on_note_leave(e))
-        # Do not auto-scroll to bottom to preserve user scroll position
+            self.canvas.tag_bind(tag, '<Leave>', lambda e: self.on_note_leave(e))        # Update scroll region to encompass all notes
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        # Auto-scroll if flagged (e.g., after autoload), then clear flag
+        if getattr(self, 'scroll_to_bottom_on_next_draw', False):
+            self.canvas.yview_moveto(1.0)
+            self.scroll_to_bottom_on_next_draw = False
 
     def on_text_modified(self, event):
         # Reset modified flag
