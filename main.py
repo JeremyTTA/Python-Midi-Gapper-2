@@ -63,11 +63,15 @@ class MidiGapperGUI(tk.Tk):
 
     def __init__(self):
         super().__init__()
-        self.title('Python Midi Gapper 2')
-        # Create a menu bar with File -> Load MIDI File
+        self.title('Python Midi Gapper 2')        # Create a menu bar with File -> Load MIDI File
         menu_bar = tk.Menu(self)
         file_menu = tk.Menu(menu_bar, tearoff=0)
         file_menu.add_command(label='Load MIDI File', command=self.load_midi_file)
+        file_menu.add_command(label='Save MIDI As...', command=self.save_midi_file)
+        file_menu.add_separator()
+        file_menu.add_command(label='Compare MIDI vs XML', command=self.compare_midi_and_xml)
+        file_menu.add_command(label='Test Round-trip Conversion', command=self.test_roundtrip_conversion)
+        file_menu.add_command(label='Test Timing Preservation', command=self.test_timing_preservation)
         menu_bar.add_cascade(label='File', menu=file_menu)
         self.config(menu=menu_bar)
         # Load window geometry
@@ -216,7 +220,7 @@ class MidiGapperGUI(tk.Tk):
         # Track visibility: show all channels by default
         self.visible_channels = set(channels)
         self.update_channel_legend()
-        # XML conversion with absolute time and duration for notes
+        # XML conversion - clean format without abs_time and duration attributes
         def format_abs(sec):
             m = int(sec // 60)
             s = sec - m*60
@@ -227,13 +231,16 @@ class MidiGapperGUI(tk.Tk):
         self.notes_for_visualization = []
         # Build XML root
         root = ET.Element('MidiFile', ticks_per_beat=str(mf.ticks_per_beat))
+        print(f"MIDI file has {len(mf.tracks)} tracks")
         for i, track in enumerate(mf.tracks):
+            print(f"Processing track {i}: {len(track)} messages")
             tr_elem = ET.SubElement(root, 'Track', name=track.name or f'Track_{i}')
             abs_time = 0.0
             tempo = 500000
             active_on = {}
+            msg_count = 0
             for msg in track:
-                # accumulate real time
+                msg_count += 1                # accumulate real time
                 delta = mido.tick2second(msg.time, mf.ticks_per_beat, tempo)
                 abs_time += delta
                 if msg.is_meta and msg.type == 'set_tempo':
@@ -244,21 +251,32 @@ class MidiGapperGUI(tk.Tk):
                 for attr, value in attrs.items():
                     if attr not in ('type', 'time'):
                         msg_elem.set(attr, str(value))
-                # note_on: record absolute time
+                # note_on: record for duration calculation but don't add abs_time to XML
                 if msg.type == 'note_on' and getattr(msg, 'velocity', 0) > 0:
                     active_on[(msg.channel, msg.note)] = (msg_elem, abs_time)
-                    msg_elem.set('abs_time', format_abs(abs_time))
-                # note_off: calculate duration
+                # note_off: calculate duration but don't add to XML
                 elif msg.type == 'note_off' or (msg.type == 'note_on' and getattr(msg, 'velocity', 0) == 0):
                     key = (getattr(msg, 'channel', None), getattr(msg, 'note', None))
                     if key in active_on:
                         start_elem, start_time = active_on.pop(key)
                         duration = abs_time - start_time
-                        start_elem.set('duration', format_dur(duration))
-                        # Record raw note data for visualization
+                        # Record raw note data for visualization (but don't add duration to XML)
                         self.notes_for_visualization.append({'start_time': start_time, 'note': key[1], 'channel': key[0], 'duration': duration})
+            print(f"Track {i} processed {msg_count} messages, XML has {len(tr_elem)} child elements")
+        print(f"Final XML root has {len(root)} tracks")
         pretty_xml = minidom.parseString(ET.tostring(root, encoding='utf-8')).toprettyxml(indent="  ")
         self.text.insert('end', pretty_xml)
+        
+        # Save XML file to same directory as MIDI file
+        try:
+            base_name = os.path.splitext(file_path)[0]
+            xml_file_path = f"{base_name}.xml"
+            with open(xml_file_path, 'w', encoding='utf-8') as xml_file:
+                xml_file.write(pretty_xml)
+            print(f"XML saved to: {xml_file_path}")
+        except Exception as e:
+            print(f"Failed to save XML file: {e}")
+        
         # Populate visualization notes from processed MIDI data (mido-based for accurate durations)
         self.notes = [(d['start_time'], d['note'], d['channel'], d['duration']) for d in self.notes_for_visualization]
         self.max_time = max((d['start_time'] + d['duration'] for d in self.notes_for_visualization), default=1)
@@ -285,6 +303,175 @@ class MidiGapperGUI(tk.Tk):
             self.config_data['last_midi'] = file_path
             save_config(self.config_data)
             self.process_midi(file_path)
+
+    def save_midi_file(self):
+        if not hasattr(self, 'midi_data') or self.midi_data is None:
+            messagebox.showwarning("No MIDI Data", "Please load a MIDI file first.")
+            return
+        
+        # Get save location with default modified name
+        default_name = ""
+        if hasattr(self, 'current_midi_file') and self.current_midi_file:
+            base_name = os.path.splitext(os.path.basename(self.current_midi_file))[0]
+            default_name = f"{base_name}-modified.mid"
+        
+        file_path = filedialog.asksaveasfilename(
+            title='Save MIDI File',
+            initialfile=default_name,
+            defaultextension='.mid',
+            filetypes=[('MIDI files', '*.mid *.midi'), ('All files', '*.*')]
+        )
+        if not file_path:
+            return
+            
+        try:
+            # Parse current XML from text widget to rebuild MIDI
+            content = self.text.get('1.0', 'end')
+            xml_start = content.find('<MidiFile')
+            if xml_start == -1:
+                messagebox.showerror("Error", "No valid XML found in text editor.")
+                return
+                
+            xml_content = content[xml_start:]
+            root = ET.fromstring(xml_content)
+            
+            # Debug: check what we're actually parsing
+            print(f"XML content preview: {xml_content[:500]}...")
+            print(f"Found {len(root.findall('Track'))} tracks in XML")
+            print(f"Original MIDI had {len(self.midi_data.tracks)} tracks")
+            
+            # Debug: Compare original vs XML message counts
+            orig_msg_counts = [len(track) for track in self.midi_data.tracks]
+            xml_msg_counts = [len(track.findall('Message')) for track in root.findall('Track')]
+            print(f"Original message counts per track: {orig_msg_counts}")
+            print(f"XML message counts per track: {xml_msg_counts}")
+            
+            # Debug: Check ticks_per_beat
+            orig_tpb = self.midi_data.ticks_per_beat
+            xml_tpb = int(root.get('ticks_per_beat', 480))
+            print(f"Ticks per beat: Original={orig_tpb}, XML={xml_tpb}")
+            if orig_tpb != xml_tpb:
+                print("⚠️  WARNING: Ticks per beat mismatch!")
+            
+            # Create new MIDI file from XML
+            ticks_per_beat = int(root.get('ticks_per_beat', 480))
+            new_midi = MidiFile(ticks_per_beat=ticks_per_beat)
+            
+            for track_elem in root.findall('Track'):
+                track = MidiTrack()
+                track_name = track_elem.get('name', '')
+                track.name = track_name
+                
+                # Debug: track processing
+                messages_found = track_elem.findall('Message')
+                print(f"Processing track '{track_name}': found {len(messages_found)} messages")
+                
+                # Count different message types for debugging
+                msg_types = {}
+                for msg_elem in messages_found:
+                    msg_type = msg_elem.get('type')
+                    msg_types[msg_type] = msg_types.get(msg_type, 0) + 1
+                print(f"  Message types: {dict(sorted(msg_types.items()))}")
+                  # Sort messages by time for proper MIDI ordering                # Process messages in their original XML order (don't sort!)
+                # The XML already preserves the correct MIDI message order with proper delta times
+                for msg_elem in track_elem.findall('Message'):
+                    msg_type = msg_elem.get('type')
+                    delta_time = int(msg_elem.get('time', 0))  # This is the correct delta time from original MIDI
+                    
+                    try:
+                        # Build kwargs for message creation, excluding XML-specific attributes
+                        kwargs = {}
+                        for key, value in msg_elem.attrib.items():
+                            if key not in ('type', 'time', 'abs_time', 'duration'):
+                                # Convert string values back to appropriate types
+                                try:
+                                    # Try to convert to int first (most MIDI attributes are integers)
+                                    if isinstance(value, str) and value.lstrip('-').isdigit():
+                                        kwargs[key] = int(value)
+                                    elif key == 'data' and isinstance(value, str):
+                                        # Handle sysex data conversion
+                                        if value.startswith('[') and value.endswith(']'):
+                                            kwargs[key] = eval(value)
+                                        else:
+                                            kwargs[key] = []
+                                    else:
+                                        # Keep as string (for text, name, key attributes)
+                                        kwargs[key] = value
+                                except:
+                                    # If conversion fails, keep original value
+                                    kwargs[key] = value
+                        
+                        # Create message based on type - use generic approach to preserve all attributes
+                        try:
+                            # Determine if this is a meta message or regular message
+                            is_meta_message = msg_type in [
+                                'set_tempo', 'time_signature', 'key_signature', 'track_name', 'text', 
+                                'copyright', 'marker', 'cue_marker', 'lyrics', 'midi_port', 'end_of_track',
+                                'sequence_number', 'channel_prefix', 'device_name', 'instrument_name', 
+                                'program_name', 'smpte_offset', 'sequencer_specific'
+                            ]
+                            
+                            if is_meta_message:
+                                # Create MetaMessage with all available kwargs
+                                msg = mido.MetaMessage(msg_type, time=delta_time, **kwargs)
+                            else:
+                                # Create regular Message with all available kwargs
+                                msg = mido.Message(msg_type, time=delta_time, **kwargs)
+                                
+                        except Exception as e:
+                            print(f"Failed to create message {msg_type} with kwargs {kwargs}: {e}")
+                            print(f"Message element attributes: {dict(msg_elem.attrib)}")
+                            # Try to provide more specific error information
+                            import traceback
+                            traceback.print_exc()
+                            continue
+                            
+                        # Successfully created message
+                        track.append(msg)
+                        if msg_type not in ['note_on', 'note_off']:  # Don't spam with note messages
+                            print(f"Successfully created {msg_type} message: {msg}")
+                        
+                    except Exception as e:
+                        print(f"Error processing message element {msg_elem.attrib}: {e}")
+                        continue
+                
+                # Add the completed track to the MIDI file
+                new_midi.tracks.append(track)
+                print(f"Added track '{track.name}' with {len(track)} messages to MIDI file")
+            
+            # Debug: Show how many tracks we created
+            print(f"Created MIDI file with {len(new_midi.tracks)} tracks")
+            
+            # Debug: Final summary of what we're saving
+            print("\n=== FINAL SAVE SUMMARY ===")
+            for i, track in enumerate(new_midi.tracks):
+                print(f"Track {i} ('{track.name}'): {len(track)} messages")
+                # Count message types
+                msg_types = {}
+                for msg in track:
+                    msg_types[msg.type] = msg_types.get(msg.type, 0) + 1
+                print(f"  Message types: {dict(sorted(msg_types.items()))}")
+                
+                # Show first few messages
+                print(f"  First 3 messages:")
+                for j, msg in enumerate(track[:3]):
+                    print(f"    {j}: {msg}")
+            
+            # Compare with original
+            print(f"\nComparison with original:")
+            print(f"  Original: {len(self.midi_data.tracks)} tracks")
+            print(f"  Reconstructed: {len(new_midi.tracks)} tracks")
+            for i, (orig_track, new_track) in enumerate(zip(self.midi_data.tracks, new_midi.tracks)):
+                print(f"  Track {i}: {len(orig_track)} → {len(new_track)} messages")
+            print("==========================")
+            
+            # Save the MIDI file
+            new_midi.save(file_path)
+            messagebox.showinfo("Success", f"MIDI file saved to: {file_path}")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save MIDI file: {str(e)}")
+            traceback.print_exc()
 
     def draw_visualization(self, notes, max_time):
         self.canvas.delete('all')
@@ -384,25 +571,19 @@ class MidiGapperGUI(tk.Tk):
                 try:
                     root = ET.fromstring(xml_str)
                 except Exception:
-                    return
-                # Build notes from XML: include start time and duration
-                notes = []
-                for tr in root.findall('Track'):
-                    for msg_elem in tr.findall('Message'):
-                        if msg_elem.get('type') == 'note_on' and int(msg_elem.get('velocity','0'))>0:
-                            abs_str = msg_elem.get('abs_time'); dur_str = msg_elem.get('duration')
-                            if abs_str:
-                                m,s = abs_str.split(':'); start = int(m)*60 + float(s)
-                                dur = float(dur_str) if dur_str is not None else 0.0
-                                # skip zero or negative durations
-                                if dur <= 0:
-                                    continue
-                                note = int(msg_elem.get('note','0')); ch = int(msg_elem.get('channel','0'))
-                                notes.append((start, note, ch, dur))
-                # Update notes and rescale
-                self.notes = notes
-                self.max_time = max((t+d for t,_,_,d in notes), default=1)
-                self.draw_visualization(self.notes, self.max_time)
+                    return                # Since abs_time and duration are no longer in XML, 
+                # we'll rely on the notes_for_visualization data that was 
+                # calculated during MIDI processing. This method is called 
+                # when text changes, but the visualization data should already 
+                # be populated from the MIDI load.
+                if hasattr(self, 'notes_for_visualization') and self.notes_for_visualization:
+                    # Use the existing visualization data
+                    self.notes = [(d['start_time'], d['note'], d['channel'], d['duration']) for d in self.notes_for_visualization]
+                    self.max_time = max((d['start_time'] + d['duration'] for d in self.notes_for_visualization), default=1)
+                    self.draw_visualization(self.notes, self.max_time)
+                else:
+                    # Fallback: try to rebuild from note on/off pairs in XML
+                    self.rebuild_notes_from_xml(root)
 
     def on_closing(self):
         # Save window geometry and Y-scale
@@ -524,6 +705,328 @@ class MidiGapperGUI(tk.Tk):
             else:
                 break
         return tempo
+
+    def rebuild_notes_from_xml(self, root):
+        """Rebuild note visualization data from XML by processing note on/off pairs"""
+        notes = []
+        active_notes = {}  # key: (channel, note) -> start_time
+        
+        # Calculate absolute time from delta times
+        for tr in root.findall('Track'):
+            abs_time = 0.0
+            ticks_per_beat = int(root.get('ticks_per_beat', 480))
+            tempo_us = 500000  # Default tempo (120 BPM)
+            
+            for msg_elem in tr.findall('Message'):
+                # Update absolute time
+                delta_time = int(msg_elem.get('time', 0))
+                abs_time += (delta_time / ticks_per_beat) * (tempo_us / 1e6)
+                
+                msg_type = msg_elem.get('type')
+                
+                # Update tempo for time calculations
+                if msg_type == 'set_tempo':
+                    tempo_us = int(msg_elem.get('tempo', 500000))
+                
+                # Process note events
+                elif msg_type == 'note_on':
+                    note = int(msg_elem.get('note', 0))
+                    channel = int(msg_elem.get('channel', 0))
+                    velocity = int(msg_elem.get('velocity', 0))
+                    
+                    if velocity > 0:
+                        # Note on
+                        active_notes[(channel, note)] = abs_time
+                    else:
+                        # Note off (velocity 0)
+                        key = (channel, note)
+                        if key in active_notes:
+                            start_time = active_notes.pop(key)
+                            duration = abs_time - start_time
+                            if duration > 0:
+                                notes.append((start_time, note, channel, duration))
+                
+                elif msg_type == 'note_off':
+                    note = int(msg_elem.get('note', 0))
+                    channel = int(msg_elem.get('channel', 0))
+                    key = (channel, note)
+                    if key in active_notes:
+                        start_time = active_notes.pop(key)
+                        duration = abs_time - start_time
+                        if duration > 0:
+                            notes.append((start_time, note, channel, duration))
+        
+        # Update visualization data
+        self.notes = notes
+        self.max_time = max((t + d for t, _, _, d in notes), default=1)
+        self.draw_visualization(self.notes, self.max_time)
+
+    def compare_midi_and_xml(self):
+        """Diagnostic function to compare original MIDI data with XML representation"""
+        if not hasattr(self, 'midi_data') or self.midi_data is None:
+            print("No MIDI data loaded")
+            return
+        
+        print("=== MIDI vs XML Comparison ===")
+        
+        # Get XML from text widget
+        content = self.text.get('1.0', 'end')
+        xml_start = content.find('<MidiFile')
+        if xml_start == -1:
+            print("No XML found in text widget")
+            return
+        
+        xml_content = content[xml_start:]
+        try:
+            xml_root = ET.fromstring(xml_content)
+        except Exception as e:
+            print(f"Failed to parse XML: {e}")
+            return
+        
+        # Compare track count
+        midi_track_count = len(self.midi_data.tracks)
+        xml_track_count = len(xml_root.findall('Track'))
+        print(f"Tracks: MIDI={midi_track_count}, XML={xml_track_count}")
+        
+        # Compare each track
+        for i, (midi_track, xml_track) in enumerate(zip(self.midi_data.tracks, xml_root.findall('Track'))):
+            print(f"\n--- Track {i} ---")
+            midi_msg_count = len(midi_track)
+            xml_msg_count = len(xml_track.findall('Message'))
+            print(f"Messages: MIDI={midi_msg_count}, XML={xml_msg_count}")
+            
+            # Compare first few messages in detail
+            xml_messages = xml_track.findall('Message')
+            for j, (midi_msg, xml_msg) in enumerate(zip(midi_track[:5], xml_messages[:5])):
+                print(f"  Message {j}:")
+                print(f"    MIDI: {midi_msg}")
+                print(f"    XML:  type={xml_msg.get('type')}, time={xml_msg.get('time')}")
+                
+                # Compare attributes
+                midi_attrs = midi_msg.dict()
+                xml_attrs = dict(xml_msg.attrib)
+                
+                midi_keys = set(midi_attrs.keys())
+                xml_keys = set(xml_attrs.keys())
+                
+                if midi_keys != xml_keys:
+                    print(f"    Attribute mismatch:")
+                    print(f"      MIDI only: {midi_keys - xml_keys}")
+                    print(f"      XML only: {xml_keys - midi_keys}")
+                
+                # Check attribute values
+                for key in midi_keys & xml_keys:
+                    midi_val = str(midi_attrs[key])
+                    xml_val = xml_attrs[key]
+                    if midi_val != xml_val:
+                        print(f"    Value mismatch for '{key}': MIDI='{midi_val}', XML='{xml_val}'")
+
+    def test_roundtrip_conversion(self):
+        """Test converting XML back to MIDI and compare with original"""
+        if not hasattr(self, 'midi_data') or self.midi_data is None:
+            print("No MIDI data loaded")
+            return
+        
+        print("=== Testing Round-trip Conversion ===")
+        
+        # Get XML from text widget
+        content = self.text.get('1.0', 'end')
+        xml_start = content.find('<MidiFile')
+        if xml_start == -1:
+            print("No XML found in text widget")
+            return
+        
+        xml_content = content[xml_start:]
+        try:
+            root = ET.fromstring(xml_content)
+        except Exception as e:
+            print(f"Failed to parse XML: {e}")
+            return
+        
+        # Convert XML back to MIDI (same logic as save function)
+        ticks_per_beat = int(root.get('ticks_per_beat', 480))
+        reconstructed_midi = MidiFile(ticks_per_beat=ticks_per_beat)
+        
+        print(f"Original ticks_per_beat: {self.midi_data.ticks_per_beat}")
+        print(f"Reconstructed ticks_per_beat: {ticks_per_beat}")
+        
+        for track_elem in root.findall('Track'):
+            track = MidiTrack()
+            track_name = track_elem.get('name', '')
+            track.name = track_name
+            
+            # Collect all messages
+            messages = []
+            for msg_elem in track_elem.findall('Message'):
+                msg_type = msg_elem.get('type')
+                time = int(msg_elem.get('time', 0))
+                
+                attrs = {'type': msg_type, 'time': time}
+                for key, value in msg_elem.attrib.items():
+                    if key not in ('type', 'time'):
+                        # Convert numeric attributes
+                        if key in ('channel', 'note', 'velocity', 'program', 'control', 'value', 'pitch', 
+                                  'port', 'numerator', 'denominator', 'clocks_per_click', 
+                                  'notated_32nd_notes_per_beat', 'tempo'):
+                            try:
+                                attrs[key] = int(value)
+                            except (ValueError, TypeError):
+                                attrs[key] = value
+                        else:
+                            attrs[key] = value
+                
+                messages.append(attrs)
+            
+            messages.sort(key=lambda x: x['time'])
+            
+            success_count = 0
+            fail_count = 0
+            
+            for msg_attrs in messages:
+                try:
+                    msg_type = msg_attrs['type']
+                    time = msg_attrs['time']
+                    
+                    # Create the message (using same logic as save function)
+                    kwargs = {k: v for k, v in msg_attrs.items() if k not in ('type', 'time')}
+                    
+                    if msg_type in ['note_on', 'note_off']:
+                        msg = mido.Message(msg_type, 
+                                         channel=kwargs.get('channel', 0),
+                                         note=kwargs.get('note', 60),
+                                         velocity=kwargs.get('velocity', 64),
+                                         time=time)
+                    elif msg_type == 'set_tempo':
+                        msg = mido.MetaMessage(msg_type, 
+                                             tempo=kwargs.get('tempo', 500000),
+                                             time=time)
+                    elif msg_type == 'time_signature':
+                        msg = mido.MetaMessage(msg_type,
+                                             numerator=kwargs.get('numerator', 4),
+                                             denominator=kwargs.get('denominator', 4),
+                                             clocks_per_click=kwargs.get('clocks_per_click', 24),
+                                             notated_32nd_notes_per_beat=kwargs.get('notated_32nd_notes_per_beat', 8),
+                                             time=time)
+                    elif msg_type == 'program_change':
+                        msg = mido.Message(msg_type,
+                                         channel=kwargs.get('channel', 0),
+                                         program=kwargs.get('program', 0),
+                                         time=time)
+                    elif msg_type == 'control_change':
+                        msg = mido.Message(msg_type,
+                                         channel=kwargs.get('channel', 0),
+                                         control=kwargs.get('control', 0),
+                                         value=kwargs.get('value', 0),
+                                         time=time)
+                    elif msg_type == 'key_signature':
+                        msg = mido.MetaMessage(msg_type,
+                                             key=kwargs.get('key', 'C'),
+                                             time=time)
+                    elif msg_type == 'midi_port':
+                        msg = mido.MetaMessage(msg_type,
+                                             port=kwargs.get('port', 0),
+                                             time=time)
+                    elif msg_type == 'end_of_track':
+                        msg = mido.MetaMessage(msg_type, time=time)
+                    else:
+                        print(f"Unsupported message type in test: {msg_type}")
+                        fail_count += 1
+                        continue
+                    
+                    track.append(msg)
+                    success_count += 1
+                    
+                except Exception as e:
+                    print(f"Failed to create message {msg_attrs}: {e}")
+                    fail_count += 1
+            
+            reconstructed_midi.tracks.append(track)
+            print(f"Track '{track.name}': {success_count} success, {fail_count} failed")
+        
+        # Compare original vs reconstructed
+        print(f"\nComparison:")
+        print(f"Original tracks: {len(self.midi_data.tracks)}")
+        print(f"Reconstructed tracks: {len(reconstructed_midi.tracks)}")
+        
+        for i, (orig_track, recon_track) in enumerate(zip(self.midi_data.tracks, reconstructed_midi.tracks)):
+            print(f"Track {i}: Original={len(orig_track)} messages, Reconstructed={len(recon_track)} messages")
+
+    def test_timing_preservation(self):
+        """Test that timing is preserved correctly in the round-trip conversion"""
+        if not hasattr(self, 'midi_data') or self.midi_data is None:
+            print("No MIDI data loaded")
+            return
+        
+        print("=== Testing Timing Preservation ===")
+        
+        # Get original timing from first track
+        orig_track = self.midi_data.tracks[0]
+        orig_times = [msg.time for msg in orig_track]
+        print(f"Original track has {len(orig_track)} messages")
+        print(f"Original delta times: {orig_times[:10]}...")  # Show first 10
+        
+        # Calculate cumulative times for original
+        orig_cumulative = []
+        cum = 0
+        for t in orig_times:
+            cum += t
+            orig_cumulative.append(cum)
+        print(f"Original cumulative times: {orig_cumulative[:10]}...")
+        
+        # Get XML from text widget and convert back to MIDI
+        content = self.text.get('1.0', 'end')
+        xml_start = content.find('<MidiFile')
+        if xml_start == -1:
+            print("No XML found")
+            return
+        
+        xml_content = content[xml_start:]
+        try:
+            root = ET.fromstring(xml_content)
+        except Exception as e:
+            print(f"Failed to parse XML: {e}")
+            return
+        
+        # Reconstruct first track
+        track_elem = root.findall('Track')[0]
+        recon_times = []
+        
+        for msg_elem in track_elem.findall('Message'):
+            delta_time = int(msg_elem.get('time', 0))
+            recon_times.append(delta_time)
+        
+        print(f"Reconstructed track has {len(recon_times)} messages")
+        print(f"Reconstructed delta times: {recon_times[:10]}...")
+        
+        # Calculate cumulative times for reconstructed
+        recon_cumulative = []
+        cum = 0
+        for t in recon_times:
+            cum += t
+            recon_cumulative.append(cum)
+        print(f"Reconstructed cumulative times: {recon_cumulative[:10]}...")
+        
+        # Compare
+        if orig_times == recon_times:
+            print("✅ Delta times preserved perfectly!")
+        else:
+            print("❌ Delta times differ!")
+            mismatches = 0
+            for i, (orig, recon) in enumerate(zip(orig_times, recon_times)):
+                if orig != recon:
+                    print(f"  Message {i}: {orig} → {recon}")
+                    mismatches += 1
+                    if mismatches >= 5:  # Limit output
+                        print(f"  ... and {len(orig_times) - i - 1} more mismatches")
+                        break
+        
+        if orig_cumulative == recon_cumulative:
+            print("✅ Cumulative timing preserved perfectly!")
+        else:
+            print("❌ Cumulative timing differs!")
+        
+        print("=== End Timing Test ===")
+
 
 if __name__ == '__main__':
     app = MidiGapperGUI()
