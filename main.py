@@ -63,17 +63,8 @@ class MidiGapperGUI(tk.Tk):
 
     def __init__(self):
         super().__init__()
-        self.title('Python Midi Gapper 2')        # Create a menu bar with File -> Load MIDI File
-        menu_bar = tk.Menu(self)
-        file_menu = tk.Menu(menu_bar, tearoff=0)
-        file_menu.add_command(label='Load MIDI File', command=self.load_midi_file)
-        file_menu.add_command(label='Save MIDI As...', command=self.save_midi_file)
-        file_menu.add_separator()
-        file_menu.add_command(label='Compare MIDI vs XML', command=self.compare_midi_and_xml)
-        file_menu.add_command(label='Test Round-trip Conversion', command=self.test_roundtrip_conversion)
-        file_menu.add_command(label='Test Timing Preservation', command=self.test_timing_preservation)
-        menu_bar.add_cascade(label='File', menu=file_menu)
-        self.config(menu=menu_bar)
+        self.title('Python Midi Gapper 2')
+        
         # Load window geometry
         self.config_data = load_config()
         # Default tempo in microseconds per quarter note
@@ -124,23 +115,86 @@ class MidiGapperGUI(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def create_widgets(self):
-        # Header frame containing midi info
-        header_frame = ttk.Frame(self)
-        header_frame.pack(side='top', fill='x')
-        # MIDI info display
-        self.midi_info_var = tk.StringVar(value='')
-        info_label = ttk.Label(header_frame, textvariable=self.midi_info_var, anchor='center')
-        info_label.pack(side='left', expand=True)
+        # Configure default TTK styles (removed black styling)
+        style = ttk.Style()
+        
+        # Combined top section with all controls, MIDI info, and channel list
+        top_section = ttk.Frame(self)
+        top_section.pack(side='top', fill='x', padx=5, pady=5)
+          # Left side: Controls
+        controls_frame = ttk.Frame(top_section)
+        controls_frame.pack(side='left', anchor='nw', padx=(0, 10))
+        
+        # Controls label
+        controls_label = ttk.Label(controls_frame, text='Controls:')
+        controls_label.pack(side='top', anchor='w', pady=(0, 5))
+        
+        # Open MIDI button
+        open_button = ttk.Button(controls_frame, text='Open MIDI File', command=self.load_midi_file)
+        open_button.pack(side='top', pady=(0, 3), anchor='w')
+        
+        # Save MIDI button
+        save_button = ttk.Button(controls_frame, text='Save MIDI As...', command=self.save_midi_file)
+        save_button.pack(side='top', pady=(0, 3), anchor='w')
+        
+        # Gap controls frame
+        gap_frame = ttk.Frame(controls_frame)
+        gap_frame.pack(side='top', pady=(0, 3), anchor='w')
+        ttk.Label(gap_frame, text='Gap (ms):').pack(side='left', padx=(0, 5))
+        self.gap_var = tk.StringVar(value='50')
+        gap_entry = ttk.Entry(gap_frame, textvariable=self.gap_var, width=6)
+        gap_entry.pack(side='left')
+        
+        # Create Gaps button
+        create_gaps_button = ttk.Button(controls_frame, text='Create Gaps', command=self.create_gaps)
+        create_gaps_button.pack(side='top', pady=(0, 3), anchor='w')
+        
+        # Center: MIDI info display
+        info_frame = ttk.Frame(top_section)
+        info_frame.pack(side='left', expand=True, fill='x', padx=(0, 10))
+        
+        ttk.Label(info_frame, text='MIDI Info:').pack(side='top', anchor='w')
+        self.midi_info_var = tk.StringVar(value='No MIDI file loaded')
+        info_label = ttk.Label(info_frame, textvariable=self.midi_info_var, anchor='w', 
+                              wraplength=300)
+        info_label.pack(side='top', anchor='w', fill='x')        
+        # Right side: Expandable Channel legend
+        self.channel_frame = ttk.LabelFrame(top_section, text='Channels')
+        self.channel_frame.pack(side='right', anchor='ne')
+        
+        # Create a scrollable frame for channels with height limitation
+        self.channel_canvas = tk.Canvas(self.channel_frame, highlightthickness=0)
+        self.channel_scrollbar = ttk.Scrollbar(self.channel_frame, orient="vertical", command=self.channel_canvas.yview)
+        self.channel_scrollable_frame = ttk.Frame(self.channel_canvas)
+        
+        # Configure the canvas
+        self.channel_scrollable_frame.bind(
+            "<Configure>",
+            lambda e: self.channel_canvas.configure(scrollregion=self.channel_canvas.bbox("all"))
+        )
+        self.channel_canvas.create_window((0, 0), window=self.channel_scrollable_frame, anchor="nw")
+        self.channel_canvas.configure(yscrollcommand=self.channel_scrollbar.set)
+        
+        # Set initial collapsed height (for ~3 items, each ~20px)
+        self.collapsed_height = 65
+        self.expanded_height = 200  # Will be adjusted based on content
+        self.channel_canvas.configure(height=self.collapsed_height, width=150)
+        
+        # Pack canvas and scrollbar
+        self.channel_canvas.pack(side="left", fill="both", expand=True)
+        self.channel_scrollbar.pack(side="right", fill="y")
+        
+        # Bind mouse events for hover expansion
+        self.bind_hover_events(self.channel_frame)
+        self.bind_hover_events(self.channel_canvas)
+        self.bind_hover_events(self.channel_scrollable_frame)
+        
+        # Store reference to actual channel content frame
+        self.channel_content_frame = self.channel_scrollable_frame
 
-        # Channel legend at top
-        self.channel_frame = ttk.LabelFrame(header_frame, text='Channels')
-        self.channel_frame.pack(side='right', anchor='ne', padx=5, pady=5)
-
-        # Notebook for tabs at bottom
+        # Notebook for tabs
         notebook = ttk.Notebook(self)
-        notebook.pack(side='bottom', fill='both', expand=True)
-
-        # Visualization tab
+        notebook.pack(side='bottom', fill='both', expand=True)        # Visualization tab
         vis_frame = ttk.Frame(notebook)
         notebook.add(vis_frame, text='Visualization')
         # Y-scale control above visualization
@@ -151,29 +205,31 @@ class MidiGapperGUI(tk.Tk):
         y_entry.pack(side='left')
         # Redraw visualization when Y-scale changes
         self.y_scale_var.trace_add('write', lambda *args: self.draw_visualization(self.notes, self.max_time))
+        
         # Container for canvas and scrollbar
         canvas_container = ttk.Frame(vis_frame)
         canvas_container.pack(fill='both', expand=True)
-        # Visualization canvas with vertical scroll enabled
+        # Visualization canvas with original white background
         self.canvas = tk.Canvas(canvas_container, bg='black', yscrollincrement=1)
         self.canvas.pack(fill='both', expand=True, side='left')
         # Vertical scrollbar for visualization
         v_scroll = ttk.Scrollbar(canvas_container, orient='vertical', command=self.canvas.yview)
         v_scroll.pack(fill='y', side='right')
-        self.canvas.configure(yscrollcommand=v_scroll.set)        # Redraw visualization on canvas resize (fix autoload sizing issues)
+        self.canvas.configure(yscrollcommand=v_scroll.set)
+        
+        # Redraw visualization on canvas resize (fix autoload sizing issues)
         def on_canvas_configure(event):
             # Don't scroll to bottom on resize events, only on initial load
             if hasattr(self, 'notes') and self.notes:
                 self.draw_visualization(self.notes, self.max_time)
         self.canvas.bind('<Configure>', on_canvas_configure)
         # Enable scrolling of visualization with mouse wheel and arrow keys
-        self.canvas.bind('<Enter>', lambda e: self.canvas.focus_set())
-        # Increase scroll speed by using a multiplier for faster scrolling
+        self.canvas.bind('<Enter>', lambda e: self.canvas.focus_set())        # Increase scroll speed by using a multiplier for faster scrolling
         scroll_factor = 20
         self.bind_all('<MouseWheel>', lambda e: self.canvas.yview_scroll(-scroll_factor * int(e.delta/120), 'units'))
         self.bind_all('<Up>', lambda e: self.canvas.yview_scroll(-scroll_factor, 'units'))
         self.bind_all('<Down>', lambda e: self.canvas.yview_scroll(scroll_factor, 'units'))
-
+        
         # Text screen tab
         text_frame = ttk.Frame(notebook)
         notebook.add(text_frame, text='Text Screen')
@@ -189,6 +245,45 @@ class MidiGapperGUI(tk.Tk):
         self.text.bind('<<Modified>>', self.on_text_modified)
         # Initialize modified flag state
         self.text.edit_modified(False)
+
+    def bind_hover_events(self, widget):
+        """Bind mouse enter/leave events to widget and all its children."""
+        widget.bind('<Enter>', self.on_channel_enter)
+        widget.bind('<Leave>', self.on_channel_leave)
+        
+        # Also bind to all children
+        try:
+            for child in widget.winfo_children():
+                self.bind_hover_events(child)
+        except:
+            pass  # Some widgets might not have children
+
+    def on_channel_enter(self, event=None):
+        """Expand channel frame when mouse enters."""
+        # Calculate expanded height based on actual content
+        self.channel_scrollable_frame.update_idletasks()
+        content_height = self.channel_scrollable_frame.winfo_reqheight()
+        # Limit to reasonable maximum
+        expanded_height = min(content_height + 20, 300)
+        self.channel_canvas.configure(height=expanded_height)
+
+    def on_channel_leave(self, event=None):
+        """Collapse channel frame when mouse leaves."""
+        # Check if mouse is really leaving the channel area
+        if event:
+            x, y = event.x_root, event.y_root
+            # Get the channel frame bounds
+            frame_x = self.channel_frame.winfo_rootx()
+            frame_y = self.channel_frame.winfo_rooty()
+            frame_width = self.channel_frame.winfo_width()
+            frame_height = self.channel_frame.winfo_height()
+            
+            # Only collapse if mouse is actually outside the frame
+            if not (frame_x <= x <= frame_x + frame_width and 
+                   frame_y <= y <= frame_y + frame_height):
+                self.channel_canvas.configure(height=self.collapsed_height)
+        else:
+            self.channel_canvas.configure(height=self.collapsed_height)
 
     def process_midi(self, file_path):
         # Display path and XML, then visualize notes
@@ -456,11 +551,11 @@ class MidiGapperGUI(tk.Tk):
                 print(f"  First 3 messages:")
                 for j, msg in enumerate(track[:3]):
                     print(f"    {j}: {msg}")
-            
-            # Compare with original
+              # Compare with original
             print(f"\nComparison with original:")
             print(f"  Original: {len(self.midi_data.tracks)} tracks")
             print(f"  Reconstructed: {len(new_midi.tracks)} tracks")
+            
             for i, (orig_track, new_track) in enumerate(zip(self.midi_data.tracks, new_midi.tracks)):
                 print(f"  Track {i}: {len(orig_track)} → {len(new_track)} messages")
             print("==========================")
@@ -471,6 +566,165 @@ class MidiGapperGUI(tk.Tk):
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save MIDI file: {str(e)}")
+            traceback.print_exc()
+
+    def create_gaps(self):
+        """Create gaps using absolute time reconstruction method that properly handles MIDI delta times."""
+        if not hasattr(self, 'midi_data') or self.midi_data is None:
+            messagebox.showwarning("No MIDI Data", "Please load a MIDI file first.")
+            return
+        try:
+            gap_ms = float(self.gap_var.get())
+            if gap_ms <= 0:
+                messagebox.showerror("Error", "Gap value must be positive.")
+                return
+            if gap_ms > 1000:
+                messagebox.showwarning("Warning", "Gap value is very large (>1000ms). This may cause significant changes to the music.")
+            
+            # Calculate gap in ticks
+            gap_seconds = gap_ms / 1000.0
+            ticks_per_second = self.midi_data.ticks_per_beat * (1e6 / self.tempo_us)
+            gap_ticks = int(gap_seconds * ticks_per_second)
+            print(f"[ROBUST GAP] Creating gaps of {gap_ms} ms ({gap_ticks} ticks)")
+
+            content = self.text.get('1.0', 'end')
+            xml_start = content.find('<MidiFile')
+            if xml_start == -1:
+                messagebox.showerror("Error", "No valid XML found in text editor.")
+                return
+            xml_content = content[xml_start:]
+            root = ET.fromstring(xml_content)
+
+            total_modifications = 0
+            min_duration_ticks = max(10, gap_ticks // 4)  # Minimum note duration
+            
+            # Process each track
+            for track_elem in root.findall('Track'):
+                print(f"Processing track with {len(track_elem.findall('Message'))} messages")
+                
+                # Step 1: Parse all events into absolute time
+                events = []
+                abs_time = 0
+                
+                for msg_elem in track_elem.findall('Message'):
+                    delta_time = int(msg_elem.get('time', 0))
+                    abs_time += delta_time
+                    
+                    event = {
+                        'element': msg_elem,
+                        'original_abs_time': abs_time,
+                        'new_abs_time': abs_time,  # Will be modified if needed
+                        'original_delta': delta_time,
+                        'type': msg_elem.get('type'),
+                        'channel': int(msg_elem.get('channel', 0)) if msg_elem.get('channel') is not None else None,
+                        'note': int(msg_elem.get('note', 0)) if msg_elem.get('note') is not None else None,
+                        'velocity': int(msg_elem.get('velocity', 0)) if msg_elem.get('velocity') is not None else None
+                    }
+                    events.append(event)
+                
+                # Step 2: Find note pairs (note_on -> note_off for same channel/pitch)
+                active_notes = {}  # (channel, note) -> start_event
+                note_pairs = []
+                
+                for event in events:
+                    if event['type'] == 'note_on' and event['velocity'] and event['velocity'] > 0:
+                        key = (event['channel'], event['note'])
+                        active_notes[key] = event
+                    elif (event['type'] == 'note_off' or 
+                          (event['type'] == 'note_on' and (not event['velocity'] or event['velocity'] == 0))):
+                        key = (event['channel'], event['note'])
+                        if key in active_notes:
+                            start_event = active_notes[key]
+                            note_pairs.append((start_event, event))
+                            del active_notes[key]
+                
+                # Step 3: Group note pairs by pitch and apply gap logic
+                notes_by_pitch = {}
+                for start_event, end_event in note_pairs:
+                    key = (start_event['channel'], start_event['note'])
+                    notes_by_pitch.setdefault(key, []).append((start_event, end_event))
+                
+                track_modifications = 0
+                
+                for key, notes in notes_by_pitch.items():
+                    if len(notes) < 2:
+                        continue
+                    
+                    # Sort by original start time
+                    notes.sort(key=lambda x: x[0]['original_abs_time'])
+                    
+                    channel, pitch = key
+                    
+                    for i in range(1, len(notes)):
+                        prev_start_event, prev_end_event = notes[i-1]
+                        curr_start_event, curr_end_event = notes[i]
+                        
+                        # Calculate gap using current absolute times (which may have been modified)
+                        prev_end_time = prev_end_event['new_abs_time']
+                        curr_start_time = curr_start_event['new_abs_time']
+                        gap = curr_start_time - prev_end_time
+                        
+                        if gap < gap_ticks:
+                            # Calculate new end time for previous note
+                            new_prev_end_time = curr_start_time - gap_ticks
+                            
+                            # Check if new note duration would be acceptable
+                            prev_start_time = prev_start_event['new_abs_time']
+                            new_duration = new_prev_end_time - prev_start_time
+                            
+                            if new_duration >= min_duration_ticks:
+                                # Apply the modification
+                                prev_end_event['new_abs_time'] = new_prev_end_time
+                                track_modifications += 1
+                                
+                                if track_modifications <= 5:  # Debug first few
+                                    print(f"  Modified Ch{channel} Note{pitch}: gap {gap} -> {gap_ticks} ticks (shortened by {prev_end_time - new_prev_end_time})")
+                            else:
+                                if track_modifications <= 5:
+                                    print(f"  Skipped Ch{channel} Note{pitch}: would make note too short ({new_duration} < {min_duration_ticks})")
+                
+                print(f"Track modifications: {track_modifications}")
+                total_modifications += track_modifications
+                
+                # Step 4: Rebuild the entire track with new delta times
+                if track_modifications > 0:
+                    # Sort all events by their new absolute times
+                    events.sort(key=lambda x: x['new_abs_time'])
+                    
+                    # Clear the track and rebuild it
+                    for msg_elem in list(track_elem):
+                        track_elem.remove(msg_elem)
+                    
+                    # Recalculate delta times and add events back
+                    prev_time = 0
+                    for event in events:
+                        new_delta = event['new_abs_time'] - prev_time
+                        event['element'].set('time', str(new_delta))
+                        track_elem.append(event['element'])
+                        prev_time = event['new_abs_time']
+                    
+                    print(f"Rebuilt track with {len(events)} events")
+            
+            if total_modifications > 0:
+                # Convert modified XML back to string and update the text editor
+                xml_str = ET.tostring(root, encoding='unicode')
+                dom = minidom.parseString(xml_str)
+                pretty_xml = dom.toprettyxml(indent='  ')
+                lines = [line for line in pretty_xml.split('\n') if line.strip()]
+                formatted_xml = '\n'.join(lines[1:])
+                new_content = content[:xml_start] + formatted_xml
+                self.text.delete('1.0', 'end')
+                self.text.insert('1.0', new_content)
+                self.modifications_applied = True
+                self.text.event_generate('<<Modified>>')
+                
+                print(f"[ROBUST GAP] Successfully applied {total_modifications} gap modifications")
+            
+            summary_msg = f"[ROBUST GAP] Created {gap_ms} ms gaps by modifying {total_modifications} note durations."
+            messagebox.showinfo("Success", summary_msg)
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to create gaps: {str(e)}")
             traceback.print_exc()
 
     def draw_visualization(self, notes, max_time):
@@ -570,20 +824,12 @@ class MidiGapperGUI(tk.Tk):
                 xml_str = content[idx:]
                 try:
                     root = ET.fromstring(xml_str)
-                except Exception:
-                    return                # Since abs_time and duration are no longer in XML, 
-                # we'll rely on the notes_for_visualization data that was 
-                # calculated during MIDI processing. This method is called 
-                # when text changes, but the visualization data should already 
-                # be populated from the MIDI load.
-                if hasattr(self, 'notes_for_visualization') and self.notes_for_visualization:
-                    # Use the existing visualization data
-                    self.notes = [(d['start_time'], d['note'], d['channel'], d['duration']) for d in self.notes_for_visualization]
-                    self.max_time = max((d['start_time'] + d['duration'] for d in self.notes_for_visualization), default=1)
-                    self.draw_visualization(self.notes, self.max_time)
-                else:
-                    # Fallback: try to rebuild from note on/off pairs in XML
+                    # Always rebuild visualization from the current XML
+                    # This ensures gaps and other modifications are reflected
                     self.rebuild_notes_from_xml(root)
+                except Exception as e:
+                    print(f"Error parsing XML for visualization: {e}")
+                    return
 
     def on_closing(self):
         # Save window geometry and Y-scale
@@ -591,16 +837,16 @@ class MidiGapperGUI(tk.Tk):
         self.config_data['y_scale'] = self.y_scale_var.get()
         save_config(self.config_data)
         self.destroy()
-
+    
     def update_channel_legend(self):
         # Clear existing legend
-        for child in self.channel_frame.winfo_children():
+        for child in self.channel_content_frame.winfo_children():
             child.destroy()
         # Create legend items per channel with visibility checkbox
         for ch, color in sorted(self.channel_colors.items()):
             program = self.channel_instruments.get(ch, 0)
             instr = GM_INSTRUMENTS[program] if program < len(GM_INSTRUMENTS) else 'Unknown'
-            item = tk.Frame(self.channel_frame)
+            item = tk.Frame(self.channel_content_frame)
             item.pack(side='top', anchor='w', pady=2)
             # Checkbox for visibility
             var = self.channel_vars.get(ch)
@@ -627,6 +873,9 @@ class MidiGapperGUI(tk.Tk):
                 widget.bind('<Button-3>', on_right)
             # Checkbox right-click selects only this channel
             cb.bind('<Button-3>', on_right)
+            
+            # Bind hover events to new items as well
+            self.bind_hover_events(item)
 
     def toggle_channel(self, ch):
         # Update visibility set based on checkbox and redraw
@@ -711,16 +960,30 @@ class MidiGapperGUI(tk.Tk):
         notes = []
         active_notes = {}  # key: (channel, note) -> start_time
         
-        # Calculate absolute time from delta times
+        # Get ticks per beat for time conversion
+        ticks_per_beat = int(root.get('ticks_per_beat', 480))
+        tempo_us = 500000  # Default tempo (120 BPM)
+        
+        # Calculate absolute time from delta times OR use abs_time if present
         for tr in root.findall('Track'):
             abs_time = 0.0
-            ticks_per_beat = int(root.get('ticks_per_beat', 480))
-            tempo_us = 500000  # Default tempo (120 BPM)
             
-            for msg_elem in tr.findall('Message'):
-                # Update absolute time
-                delta_time = int(msg_elem.get('time', 0))
-                abs_time += (delta_time / ticks_per_beat) * (tempo_us / 1e6)
+            for msg_elem in tr.findall('Message'):                # Check if abs_time is present (from our gapping modifications)
+                if msg_elem.get('abs_time') is not None:
+                    # Use the abs_time directly (convert from ticks to seconds)
+                    try:
+                        abs_time_str = msg_elem.get('abs_time')
+                        # Handle both integer and float string representations
+                        abs_time_ticks = int(float(abs_time_str))
+                        abs_time = (abs_time_ticks / ticks_per_beat) * (tempo_us / 1e6)
+                    except (ValueError, TypeError) as e:
+                        print(f"Warning: Invalid abs_time value '{abs_time_str}', falling back to delta time calculation")
+                        delta_time = int(msg_elem.get('time', 0))
+                        abs_time += (delta_time / ticks_per_beat) * (tempo_us / 1e6)
+                else:
+                    # Calculate from delta time
+                    delta_time = int(msg_elem.get('time', 0))
+                    abs_time += (delta_time / ticks_per_beat) * (tempo_us / 1e6)
                 
                 msg_type = msg_elem.get('type')
                 
