@@ -204,24 +204,36 @@ class MidiGapperGUI(tk.Tk):
         y_entry.pack(side='left')
         # Redraw visualization when Y-scale changes
         self.y_scale_var.trace_add('write', lambda *args: self.draw_visualization(self.notes, self.max_time))
-        
-        # Container for canvas and scrollbar
+          # Container for canvas and scrollbar
         canvas_container = ttk.Frame(vis_frame)
         canvas_container.pack(fill='both', expand=True)
+        
+        # Main canvas container (visualization + keyboard)
+        main_canvas_frame = ttk.Frame(canvas_container)
+        main_canvas_frame.pack(fill='both', expand=True, side='left')
+        
         # Visualization canvas with original white background
-        self.canvas = tk.Canvas(canvas_container, bg='black', yscrollincrement=1)
-        self.canvas.pack(fill='both', expand=True, side='left')
-        # Vertical scrollbar for visualization
+        self.canvas = tk.Canvas(main_canvas_frame, bg='black', yscrollincrement=1)
+        self.canvas.pack(fill='both', expand=True)
+          # Keyboard canvas underneath (fixed height, Synthesia style) - 2x scale
+        self.keyboard_canvas = tk.Canvas(main_canvas_frame, bg='#2a2a2a', height=200)
+        self.keyboard_canvas.pack(fill='x', side='bottom')
+        
+        # Vertical scrollbar for visualization only
         v_scroll = ttk.Scrollbar(canvas_container, orient='vertical', command=self.canvas.yview)
         v_scroll.pack(fill='y', side='right')
         self.canvas.configure(yscrollcommand=v_scroll.set)
-        
-        # Redraw visualization on canvas resize (fix autoload sizing issues)
+          # Redraw visualization on canvas resize (fix autoload sizing issues)
         def on_canvas_configure(event):
             # Don't scroll to bottom on resize events, only on initial load
             if hasattr(self, 'notes') and self.notes:
                 self.draw_visualization(self.notes, self.max_time)
         self.canvas.bind('<Configure>', on_canvas_configure)
+        
+        # Redraw keyboard on resize
+        def on_keyboard_configure(event):
+            self.draw_keyboard()
+        self.keyboard_canvas.bind('<Configure>', on_keyboard_configure)
         # Enable scrolling of visualization with mouse wheel and arrow keys
         self.canvas.bind('<Enter>', lambda e: self.canvas.focus_set())        # Increase scroll speed by using a multiplier for faster scrolling
         scroll_factor = 20
@@ -739,23 +751,19 @@ class MidiGapperGUI(tk.Tk):
         # Dimensions for keys: white and black key widths
         white_key_w = width / 88
         black_key_w = white_key_w * 0.75
-        radius = 2  # corner radius
-        # Draw measure lines (assume 4/4 time)
-        # seconds per quarter note from initial tempo
-        spqn = self.tempo_us / 1e6
-        meas_dur = 4 * spqn
-        num_measures = int(max_time // meas_dur) + 1
-        for m in range(1, num_measures + 1):
-            t = m * meas_dur
+        radius = 2  # corner radius        # Draw time lines every 2 seconds
+        line_interval = 2.0  # 2 seconds
+        num_lines = int(max_time // line_interval) + 1
+        for i in range(1, num_lines + 1):
+            t = i * line_interval
             # map time to Y in total_height space (0 at top)
             y = total_height - (t / max_time) * total_height
             self.canvas.create_line(0, y, width, y, fill='#444')
-            # Label time, measure number, and tempo just above the line in blue with larger font
+            # Label time just above the line
             minutes = int(t // 60)
             seconds = t % 60
             time_str = f"{minutes:02d}:{seconds:05.3f}"
-            bpm = int(round(60e6 / self.tempo_us))
-            self.canvas.create_text(6, y - 14, text=f"{time_str} M{m} BPM{bpm}", anchor='nw', fill='white', font=self.vis_font)
+            self.canvas.create_text(6, y - 14, text=time_str, anchor='nw', fill='white', font=self.vis_font)
         # Draw octave lines before each C key
         for note in range(21, 109):
             if note % 12 == 0:
@@ -800,16 +808,97 @@ class MidiGapperGUI(tk.Tk):
             gap = time - prev if prev is not None else None
             prev_end[note] = time + dur
             # Store data for tooltip
-            self.rect_data[tag] = {'note': note, 'start': time, 'dur': dur, 'gap': gap}
-            # Bind hover events
+            self.rect_data[tag] = {'note': note, 'start': time, 'dur': dur, 'gap': gap}            # Bind hover events
             self.canvas.tag_bind(tag, '<Enter>', lambda e, t=tag: self.on_note_enter(e, t))
-            self.canvas.tag_bind(tag, '<Leave>', lambda e: self.on_note_leave(e))        # Update scroll region to encompass all notes
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-        # Auto-scroll if flagged (e.g., after autoload), then clear flag
+            self.canvas.tag_bind(tag, '<Leave>', lambda e: self.on_note_leave(e))        
+        
+        # Draw the keyboard underneath the visualization
+        self.draw_keyboard()
+        
+        # Update scroll region to encompass all notes
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))        # Auto-scroll if flagged (e.g., after autoload), then clear flag
         if getattr(self, 'scroll_to_bottom_on_next_draw', False):
             self.canvas.yview_moveto(1.0)
             self.scroll_to_bottom_on_next_draw = False
 
+    def draw_keyboard(self):
+        """Draw an 88-key piano keyboard in Synthesia style underneath the visualization."""
+        if not hasattr(self, 'keyboard_canvas'):
+            return
+            
+        self.keyboard_canvas.delete('all')
+        self.keyboard_canvas.update_idletasks()
+        
+        width = self.keyboard_canvas.winfo_width()
+        height = self.keyboard_canvas.winfo_height()
+        
+        if width <= 1 or height <= 1:
+            return
+            
+        # Draw 2 pixel high blue horizontal line at the top
+        self.keyboard_canvas.create_rectangle(0, 0, width, 2, fill='blue', outline='blue')
+        
+        # 88 keys total (A0 to C8), starting from MIDI note 21
+        # White key pattern: C, D, E, F, G, A, B (7 white keys per octave)
+        # Black key pattern: C#, D#, F#, G#, A# (5 black keys per octave)
+        
+        white_key_width = width / 52  # 52 white keys in 88-key piano
+        white_key_height = height - 15  # Leave space for blue line at top and margin at bottom
+        black_key_width = white_key_width * 0.6
+        black_key_height = white_key_height * 0.6
+        
+        # Draw white keys first
+        white_key_x = 0
+        for note in range(21, 109):  # MIDI notes 21-108 (88 keys)
+            semitone = note % 12
+            # White keys: C(0), D(2), E(4), F(5), G(7), A(9), B(11)
+            if semitone in [0, 2, 4, 5, 7, 9, 11]:
+                # Create white key
+                x1 = white_key_x
+                y1 = 8  # Start below the blue line
+                x2 = white_key_x + white_key_width - 1
+                y2 = y1 + white_key_height
+                
+                # White key background
+                self.keyboard_canvas.create_rectangle(
+                    x1, y1, x2, y2, 
+                    fill='white', outline='#666', width=1
+                )
+                
+                # Label C keys with octave number
+                if semitone == 0:
+                    octave = (note // 12) - 1
+                    self.keyboard_canvas.create_text(
+                        x1 + white_key_width/2, y2 - 15,
+                        text=f'C{octave}', fill='#666', 
+                        font=('Arial', 8), anchor='center'
+                    )
+                
+                white_key_x += white_key_width
+        
+        # Draw black keys on top
+        white_key_x = 0
+        for note in range(21, 109):  # MIDI notes 21-108
+            semitone = note % 12
+            
+            # Position black keys between appropriate white keys
+            if semitone in [0, 2, 4, 5, 7, 9, 11]:  # White key
+                if semitone in [0, 2, 5, 7, 9]:  # White keys that have black keys to their right
+                    next_note = note + 1
+                    if next_note < 109:  # Make sure we don't go beyond the keyboard
+                        next_semitone = next_note % 12
+                        if next_semitone in [1, 3, 6, 8, 10]:  # Next note is black
+                            # Draw black key
+                            black_x = white_key_x + white_key_width - (black_key_width / 2)
+                            black_y = 8  # Start below the blue line
+                            
+                            self.keyboard_canvas.create_rectangle(
+                                black_x, black_y, 
+                                black_x + black_key_width, black_y + black_key_height,
+                                fill='#1a1a1a', outline='#333', width=1
+                            )
+                
+                white_key_x += white_key_width
     def on_text_modified(self, event):
         # Reset modified flag
         text_widget = event.widget
