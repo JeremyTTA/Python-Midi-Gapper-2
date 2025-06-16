@@ -13,8 +13,7 @@ from mido import MidiFile, MidiTrack
 import tkinter.font as tkfont
 
 # Predefined distinct colors for channels
-DEFAULT_CHANNEL_COLORS = [
-    '#e6194b', '#3cb44b', '#ffe119', '#4363d8', '#f58231', '#911eb4',
+DEFAULT_CHANNEL_COLORS = [    '#e6194b', '#3cb44b', '#ffe119', '#4363d8', '#f58231', '#911eb4',
     '#46f0f0', '#f032e6', '#bcf60c', '#fabebe', '#008080', '#e6beff',
     '#9a6324', '#fffac8', '#800000', '#aaffc3'
 ]
@@ -132,35 +131,36 @@ class MidiGapperGUI(tk.Tk):
         # Open MIDI button
         open_button = ttk.Button(controls_frame, text='Open MIDI File', command=self.load_midi_file)
         open_button.pack(side='top', pady=(0, 3), anchor='w')
-        
-        # Save MIDI button
+          # Save MIDI button
         save_button = ttk.Button(controls_frame, text='Save MIDI As...', command=self.save_midi_file)
         save_button.pack(side='top', pady=(0, 3), anchor='w')
         
+        # Gap controls in separate frame
+        gap_controls_frame = ttk.LabelFrame(top_section, text='Gap Controls')
+        gap_controls_frame.pack(side='left', anchor='nw', padx=(10, 10))
+        
         # Gap controls frame
-        gap_frame = ttk.Frame(controls_frame)
-        gap_frame.pack(side='top', pady=(0, 3), anchor='w')
+        gap_frame = ttk.Frame(gap_controls_frame)
+        gap_frame.pack(side='top', pady=(5, 5), anchor='w')
         ttk.Label(gap_frame, text='Gap (ms):').pack(side='left', padx=(0, 5))
         self.gap_var = tk.StringVar(value='50')
         gap_entry = ttk.Entry(gap_frame, textvariable=self.gap_var, width=6)
         gap_entry.pack(side='left')
         
         # Create Gaps button
-        create_gaps_button = ttk.Button(controls_frame, text='Create Gaps', command=self.create_gaps)
-        create_gaps_button.pack(side='top', pady=(0, 3), anchor='w')
-        
+        create_gaps_button = ttk.Button(gap_controls_frame, text='Create Gaps', command=self.create_gaps)
+        create_gaps_button.pack(side='top', pady=(0, 5), anchor='w')
         # Center: MIDI info display
         info_frame = ttk.Frame(top_section)
         info_frame.pack(side='left', expand=True, fill='x', padx=(0, 10))
         
-        ttk.Label(info_frame, text='MIDI Info:').pack(side='top', anchor='w')
+        ttk.Label(info_frame, text='MIDI Info:').pack(side='top')
         self.midi_info_var = tk.StringVar(value='No MIDI file loaded')
-        info_label = ttk.Label(info_frame, textvariable=self.midi_info_var, anchor='w', 
-                              wraplength=300)
-        info_label.pack(side='top', anchor='w', fill='x')        
-        # Right side: Expandable Channel legend
+        info_label = ttk.Label(info_frame, textvariable=self.midi_info_var, anchor='center', 
+                              wraplength=300, justify='center')
+        info_label.pack(side='top', fill='x')        # Right side: Expandable Channel legend
         self.channel_frame = ttk.LabelFrame(top_section, text='Channels')
-        self.channel_frame.pack(side='right', anchor='ne')
+        self.channel_frame.pack(side='right', anchor='ne', padx=(0, 100))
         
         # Create a scrollable frame for channels with height limitation
         self.channel_canvas = tk.Canvas(self.channel_frame, highlightthickness=0)
@@ -174,11 +174,10 @@ class MidiGapperGUI(tk.Tk):
         )
         self.channel_canvas.create_window((0, 0), window=self.channel_scrollable_frame, anchor="nw")
         self.channel_canvas.configure(yscrollcommand=self.channel_scrollbar.set)
-        
-        # Set initial collapsed height (for ~3 items, each ~20px)
+          # Set initial collapsed height (for ~3 items, each ~20px)
         self.collapsed_height = 65
         self.expanded_height = 200  # Will be adjusted based on content
-        self.channel_canvas.configure(height=self.collapsed_height, width=150)
+        self.channel_canvas.configure(height=self.collapsed_height, width=280)
         
         # Pack canvas and scrollbar
         self.channel_canvas.pack(side="left", fill="both", expand=True)
@@ -854,28 +853,36 @@ class MidiGapperGUI(tk.Tk):
                 var = tk.BooleanVar(value=(ch in self.visible_channels))
                 self.channel_vars[ch] = var
             cb = tk.Checkbutton(item, variable=var, command=lambda ch=ch: self.toggle_channel(ch))
+            # 'S' button for selecting only this channel
+            select_btn = tk.Button(item, text='S', width=2, height=1, 
+                                 command=lambda ch=ch: self.select_only_channel(ch),
+                                 font=('Arial', 8, 'bold'))
             # Color indicator and label will be alongside checkbox
             dot = tk.Canvas(item, width=12, height=12, bg=color, highlightthickness=0)
             lbl = ttk.Label(item, text=f'Ch {ch}: {instr}', foreground=color)
             # Pack widgets
             cb.pack(side='left')
+            select_btn.pack(side='left', padx=(2, 2))
             dot.pack(side='left', padx=(4,4))
-            lbl.pack(side='left')
-            # Define click handlers
+            lbl.pack(side='left')            # Define click handlers
             def on_left(e, ch=ch, var=var):
                 var.set(not var.get())
                 self.toggle_channel(ch)
-            def on_right(e, ch=ch, var=var):
-                self.select_only_channel(ch)
-            # Bind left-click and right-click on row frame, dot, and label only (checkbox handles its own toggle)
+            def on_right(e, ch=ch):
+                self.show_channel_delete_menu(e, ch)
+            
+            # Bind left-click on row frame, dot, and label only (checkbox handles its own toggle)
             for widget in (item, dot, lbl):
                 widget.bind('<Button-1>', on_left)
                 widget.bind('<Button-3>', on_right)
-            # Checkbox right-click selects only this channel
+            
+            # Also bind right-click to checkbox and select button
             cb.bind('<Button-3>', on_right)
+            select_btn.bind('<Button-3>', on_right)
             
             # Bind hover events to new items as well
             self.bind_hover_events(item)
+            self.bind_hover_events(select_btn)
 
     def toggle_channel(self, ch):
         # Update visibility set based on checkbox and redraw
@@ -1289,6 +1296,102 @@ class MidiGapperGUI(tk.Tk):
             print("❌ Cumulative timing differs!")
         
         print("=== End Timing Test ===")
+
+    def show_channel_delete_menu(self, event, channel):
+        """Show context menu for channel deletion"""
+        import tkinter.messagebox as msgbox
+        
+        # Get channel info for confirmation
+        program = self.channel_instruments.get(channel, 0)
+        instr = GM_INSTRUMENTS[program] if program < len(GM_INSTRUMENTS) else 'Unknown'
+        
+        # Show confirmation dialog
+        result = msgbox.askyesno(
+            "Delete Channel", 
+            f"Are you sure you want to delete Channel {channel} ({instr})?\n\n"
+            f"This will permanently remove all notes from this channel."
+        )
+        
+        if result:
+            self.delete_channel(channel)
+    
+    def delete_channel(self, channel):
+        """Delete a channel from the MIDI data, XML, and visualization"""
+        try:
+            # Remove from channel tracking
+            if channel in self.channel_colors:
+                del self.channel_colors[channel]
+            if channel in self.channel_instruments:
+                del self.channel_instruments[channel]
+            if channel in self.channel_vars:
+                del self.channel_vars[channel]
+            if channel in self.visible_channels:
+                self.visible_channels.discard(channel)
+            
+            # Remove from visualization data
+            self.notes_for_visualization = [
+                note for note in self.notes_for_visualization 
+                if note['channel'] != channel
+            ]
+            
+            # Update notes list for visualization
+            self.notes = [(d['start_time'], d['note'], d['channel'], d['duration']) 
+                         for d in self.notes_for_visualization]
+            self.max_time = max((d['start_time'] + d['duration'] for d in self.notes_for_visualization), default=1)
+            
+            # Remove from XML in text widget
+            self.remove_channel_from_xml(channel)
+            
+            # Update channel legend
+            self.update_channel_legend()
+            
+            # Redraw visualization
+            self.draw_visualization(self.notes, self.max_time)
+            
+            print(f"Channel {channel} deleted successfully")
+            
+        except Exception as e:
+            import tkinter.messagebox as msgbox
+            msgbox.showerror("Error", f"Failed to delete channel {channel}: {str(e)}")
+    
+    def remove_channel_from_xml(self, channel):
+        """Remove all messages for a specific channel from the XML text"""
+        try:
+            content = self.text.get('1.0', 'end')
+            xml_start = content.find('<MidiFile')
+            
+            if xml_start == -1:
+                return
+                
+            xml_content = content[xml_start:]
+            
+            # Parse XML
+            root = ET.fromstring(xml_content)
+            
+            # Remove messages with the specified channel
+            for track in root.findall('Track'):
+                messages_to_remove = []
+                for msg in track.findall('Message'):
+                    if msg.get('channel') == str(channel):
+                        messages_to_remove.append(msg)
+                
+                # Remove the messages
+                for msg in messages_to_remove:
+                    track.remove(msg)
+              # Convert back to pretty XML
+            pretty_xml = minidom.parseString(ET.tostring(root, encoding='utf-8')).toprettyxml(indent="  ")
+            
+            # Remove empty lines
+            lines = pretty_xml.split('\n')
+            non_empty_lines = [line for line in lines if line.strip()]
+            clean_xml = '\n'.join(non_empty_lines)
+            
+            # Update text widget
+            self.text.delete('1.0', 'end')
+            self.text.insert('1.0', clean_xml)
+            
+        except Exception as e:
+            print(f"Error removing channel {channel} from XML: {e}")
 
 
 if __name__ == '__main__':
