@@ -149,16 +149,52 @@ class MidiGapperGUI(tk.Tk):
         
         # Create Gaps button
         create_gaps_button = ttk.Button(gap_controls_frame, text='Create Gaps', command=self.create_gaps)
-        create_gaps_button.pack(side='top', pady=(0, 5), anchor='w')
-        # Center: MIDI info display
+        create_gaps_button.pack(side='top', pady=(0, 5), anchor='w')        # Center: MIDI info display
         info_frame = ttk.Frame(top_section)
         info_frame.pack(side='left', expand=True, fill='x', padx=(0, 10))
         
-        ttk.Label(info_frame, text='MIDI Info:').pack(side='top')
-        self.midi_info_var = tk.StringVar(value='No MIDI file loaded')
-        info_label = ttk.Label(info_frame, textvariable=self.midi_info_var, anchor='center', 
-                              wraplength=300, justify='center')
-        info_label.pack(side='top', fill='x')        # Right side: Expandable Channel legend
+        # MIDI Info title with enhanced styling
+        title_label = tk.Label(info_frame, text='MIDI Info:', 
+                              font=('Arial', 12, 'bold'), 
+                              fg='blue', bg=self.cget('bg'))
+        title_label.pack(side='top')
+        
+        # Container for MIDI info details
+        details_frame = ttk.Frame(info_frame)
+        details_frame.pack(side='top', fill='x', pady=(5, 0))
+        
+        # Individual info variables and labels
+        self.midi_filename_var = tk.StringVar(value='No MIDI file loaded')
+        self.midi_tracks_var = tk.StringVar(value='')
+        self.midi_format_var = tk.StringVar(value='')
+        self.midi_ticks_var = tk.StringVar(value='')
+        self.midi_tempo_var = tk.StringVar(value='')
+        self.midi_duration_var = tk.StringVar(value='')
+        
+        # Create info labels
+        filename_label = ttk.Label(details_frame, textvariable=self.midi_filename_var, 
+                                  anchor='center', justify='center', font=('Arial', 10, 'bold'))
+        filename_label.pack(side='top', fill='x')
+        
+        tracks_label = ttk.Label(details_frame, textvariable=self.midi_tracks_var, 
+                                anchor='center', justify='center')
+        tracks_label.pack(side='top', fill='x')
+        
+        format_label = ttk.Label(details_frame, textvariable=self.midi_format_var, 
+                                anchor='center', justify='center')
+        format_label.pack(side='top', fill='x')
+        
+        ticks_label = ttk.Label(details_frame, textvariable=self.midi_ticks_var, 
+                               anchor='center', justify='center')
+        ticks_label.pack(side='top', fill='x')
+        
+        tempo_label = ttk.Label(details_frame, textvariable=self.midi_tempo_var, 
+                               anchor='center', justify='center')
+        tempo_label.pack(side='top', fill='x')
+        
+        duration_label = ttk.Label(details_frame, textvariable=self.midi_duration_var, 
+                                  anchor='center', justify='center')
+        duration_label.pack(side='top', fill='x')# Right side: Expandable Channel legend
         self.channel_frame = ttk.LabelFrame(top_section, text='Channels')
         self.channel_frame.pack(side='right', anchor='ne', padx=(0, 100))
         
@@ -385,17 +421,57 @@ class MidiGapperGUI(tk.Tk):
         
         # Populate visualization notes from processed MIDI data (mido-based for accurate durations)
         self.notes = [(d['start_time'], d['note'], d['channel'], d['duration']) for d in self.notes_for_visualization]
-        self.max_time = max((d['start_time'] + d['duration'] for d in self.notes_for_visualization), default=1)
-        # Update the MIDI info label with all tempo changes
-        # Convert tempo_changes (microseconds per quarter note) to BPM list
+        self.max_time = max((d['start_time'] + d['duration'] for d in self.notes_for_visualization), default=1)        # Update the MIDI info labels with detailed information
+        fname = os.path.basename(file_path)
+        
+        # Get MIDI format type (0, 1, or 2)
+        midi_format = getattr(mf, 'type', 'Unknown')
+        
+        # Get ticks per beat
+        ticks_per_beat = getattr(mf, 'ticks_per_beat', 'Unknown')
+        
+        # Calculate total duration in minutes:seconds
+        duration_minutes = int(self.max_time // 60)
+        duration_seconds = int(self.max_time % 60)
+        duration_str = f"{duration_minutes}:{duration_seconds:02d}"
+          # Get tempo information
         tempos_us = [msg.tempo for track in mf.tracks for msg in track if msg.is_meta and msg.type == 'set_tempo']
         if not tempos_us:
             tempos_us = [self.tempo_us]
-        tempos_bpm = [str(int(round(60e6/t))) for t in tempos_us]
-        tempo_str = ','.join(tempos_bpm)
-        fname = os.path.basename(file_path)
-        # Show only filename and track count in header
-        self.midi_info_var.set(f"{fname} | Tracks: {len(mf.tracks)}")
+        tempos_bpm = [int(round(60e6/t)) for t in tempos_us]
+        
+        # Remove duplicates while preserving order
+        unique_tempos = []
+        for tempo in tempos_bpm:
+            if tempo not in unique_tempos:
+                unique_tempos.append(tempo)
+        
+        # Create compact tempo display
+        if len(unique_tempos) == 1:
+            tempo_str = f"Tempo: {unique_tempos[0]} BPM"
+        elif len(unique_tempos) == 2:
+            tempo_str = f"Tempos: {unique_tempos[0]}-{unique_tempos[1]} BPM"
+        elif len(unique_tempos) <= 4:
+            tempo_str = f"Tempos: {', '.join(map(str, unique_tempos))} BPM"
+        else:
+            # For many tempos, show range
+            min_tempo = min(unique_tempos)
+            max_tempo = max(unique_tempos)
+            if min_tempo == max_tempo:
+                tempo_str = f"Tempo: {min_tempo} BPM"
+            else:
+                tempo_str = f"Tempos: {min_tempo}-{max_tempo} BPM ({len(unique_tempos)} changes)"
+        
+        # Count total notes
+        total_notes = len(self.notes_for_visualization)
+        
+        # Update all info variables
+        self.midi_filename_var.set(fname)
+        self.midi_tracks_var.set(f"Tracks: {len(mf.tracks)} | Notes: {total_notes}")
+        self.midi_format_var.set(f"Format: Type {midi_format}")
+        self.midi_ticks_var.set(f"Ticks per Beat: {ticks_per_beat}")
+        self.midi_tempo_var.set(tempo_str)
+        self.midi_duration_var.set(f"Duration: {duration_str}")
         # Draw visualization and request scroll-to-bottom
         self.scroll_to_bottom_on_next_draw = True
         self.draw_visualization(self.notes, self.max_time)
