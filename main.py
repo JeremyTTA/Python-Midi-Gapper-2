@@ -208,9 +208,8 @@ class MidiGapperGUI(tk.Tk):
         # Position label
         position_label = tk.Label(clock_frame, text='Position:', font=('Arial', 10, 'bold'))
         position_label.pack(side='top', anchor='w')
-        
-        # Larger LED display canvas
-        self.led_clock = tk.Canvas(clock_frame, width=160, height=40, bg='black', 
+          # Larger LED display canvas (increased width to accommodate full time string)
+        self.led_clock = tk.Canvas(clock_frame, width=200, height=40, bg='black', 
                                  highlightthickness=2, highlightbackground='gray',
                                  relief='sunken', bd=2)
         self.led_clock.pack(side='top', pady=(3, 0))
@@ -2064,35 +2063,41 @@ class MidiGapperGUI(tk.Tk):
         minutes = int(self.playback_position // 60)
         seconds = int(self.playback_position % 60)
         milliseconds = int((self.playback_position % 1) * 1000)
-        
-        # Format as MM:SS.mmm
+          # Format as MM:SS.mmm
         time_str = f"{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
           # LED segment colors
         led_on_color = '#00FF00'  # Bright green for active segments
         led_off_color = '#003300'  # Dark green for inactive segments
-          # Draw LED-style digits (scaled up for larger display)
-        char_width = 18  # Increased from 14
-        char_spacing = 3  # Increased from 2  
-        start_x = 8  # Increased from 5
+          # Draw LED-style digits (scaled up for larger display and centered)
+        char_width = 18  # Character width
+        char_spacing = 3  # Spacing between characters
+        
+        # Calculate total width needed for the time string
+        total_text_width = len(time_str) * char_width + (len(time_str) - 1) * char_spacing
+          # Center the text horizontally in the 200px wide canvas
+        canvas_width = 200
+        start_x = (canvas_width - total_text_width) // 2
+        
+        # Vertical offset to center the 24px tall digits in the 40px canvas
+        y_offset = (40 - 24) // 2
         
         for i, char in enumerate(time_str):
             x_pos = start_x + i * (char_width + char_spacing)
             
             if char == ':':
-                # Draw colon as two dots (scaled for larger display)
-                self.led_clock.create_oval(x_pos + 6, 12, x_pos + 12, 18, 
+                # Draw colon as two dots (centered vertically)
+                self.led_clock.create_oval(x_pos + 6, y_offset + 8, x_pos + 12, y_offset + 14, 
                                          fill=led_on_color, outline=led_on_color)
-                self.led_clock.create_oval(x_pos + 6, 22, x_pos + 12, 28, 
+                self.led_clock.create_oval(x_pos + 6, y_offset + 16, x_pos + 12, y_offset + 22, 
                                          fill=led_on_color, outline=led_on_color)
             elif char == '.':
-                # Draw decimal point as a small dot (scaled for larger display)
-                self.led_clock.create_oval(x_pos + 8, 28, x_pos + 14, 34, 
+                # Draw decimal point as a small dot (centered vertically)
+                self.led_clock.create_oval(x_pos + 8, y_offset + 20, x_pos + 14, y_offset + 26, 
                                          fill=led_on_color, outline=led_on_color)
-            else:
-                # Draw digit using 7-segment display pattern
-                self.draw_led_digit(x_pos, char, led_on_color, led_off_color)
+            else:                # Draw digit using 7-segment display pattern
+                self.draw_led_digit(x_pos, y_offset, char, led_on_color, led_off_color)
 
-    def draw_led_digit(self, x, digit, on_color, off_color):
+    def draw_led_digit(self, x, y_offset, digit, on_color, off_color):
         """Draw a single LED digit using 7-segment display pattern"""
         # 7-segment display patterns for digits 0-9
         segments = {
@@ -2127,14 +2132,13 @@ class MidiGapperGUI(tk.Tk):
             # middle
             [(3, 12), (9, 12), (9, 13), (3, 13)]
         ]
-        
-        # Draw each segment
+          # Draw each segment
         for i, coords in enumerate(seg_coords):
             color = on_color if pattern[i] else off_color
-            # Convert relative coordinates to absolute
+            # Convert relative coordinates to absolute (with vertical centering)
             abs_coords = []
             for px, py in coords:
-                abs_coords.extend([x + px, py])
+                abs_coords.extend([x + px, y_offset + py])
             
             self.led_clock.create_polygon(abs_coords, fill=color, outline=color)
     
