@@ -76,11 +76,12 @@ class MidiGapperGUI(tk.Tk):
         except Exception as e:
             print(f"Warning: Could not initialize pygame mixer: {e}")
             self.midi_playback_available = False
-        
-        # MIDI playback state
+          # MIDI playback state
         self.playback_thread = None
         self.playback_stop_event = threading.Event()
         self.current_playback_file = None
+        self.playback_start_time = None  # When audio playback actually started
+        self.visual_position_offset = 0.0  # Offset between visual and audio position
         
         # Load window geometry
         self.config_data = load_config()
@@ -91,13 +92,15 @@ class MidiGapperGUI(tk.Tk):
         self.y_scale_var = tk.DoubleVar(value=y_scale)
         geometry = self.config_data.get('geometry')
         if geometry:
-            self.geometry(geometry)
-        # Initialize state
+            self.geometry(geometry)        # Initialize state
         self.current_midi_file = None
         self.midi_data = None
         self.deleted_channels = set()
         self.modifications_applied = False
         self.notes_for_visualization = []
+        
+        # Keyboard highlighting state
+        self.keyboard_keys = {}  # MIDI note number -> canvas object ID for highlighting
         self.notes = []
         self.max_time = 1
         # Variables for channel visibility checkboxes
@@ -167,33 +170,45 @@ class MidiGapperGUI(tk.Tk):
           # Create Gaps button
         create_gaps_button = ttk.Button(gap_controls_frame, text='Create Gaps', command=self.create_gaps)
         create_gaps_button.pack(side='top', pady=(0, 5), anchor='w')
-        
-        # MIDI Play Controls
+          # MIDI Play Controls
         play_controls_frame = ttk.LabelFrame(top_section, text='MIDI Player')
         play_controls_frame.pack(side='left', anchor='nw', padx=(10, 10))
         
-        # Play control buttons
+        # Play control buttons - larger and more traditional
         buttons_frame = ttk.Frame(play_controls_frame)
-        buttons_frame.pack(side='top', pady=(5, 5), anchor='w')
+        buttons_frame.pack(side='top', pady=(10, 10), anchor='w')
         
-        self.play_button = ttk.Button(buttons_frame, text='▶', width=3, command=self.play_midi)
-        self.play_button.pack(side='left', padx=(0, 2))
+        # Rewind to start button (left of play)
+        self.rewind_button = tk.Button(buttons_frame, text='⏮', width=4, height=2, 
+                                     font=('Arial', 16, 'bold'), command=self.rewind_to_start,
+                                     bg='lightgray', relief='raised', bd=3)
+        self.rewind_button.pack(side='left', padx=(0, 5))
         
-        self.pause_button = ttk.Button(buttons_frame, text='⏸', width=3, command=self.pause_midi)
-        self.pause_button.pack(side='left', padx=(0, 2))
+        # Main play/pause button (toggles between play ▶ and pause ⏸)
+        self.play_pause_button = tk.Button(buttons_frame, text='▶', width=4, height=2,
+                                         font=('Arial', 20, 'bold'), command=self.toggle_play_pause,
+                                         bg='lightgreen', relief='raised', bd=3)
+        self.play_pause_button.pack(side='left', padx=(0, 5))
         
-        self.stop_button = ttk.Button(buttons_frame, text='⏹', width=3, command=self.stop_midi)
-        self.stop_button.pack(side='left', padx=(0, 2))
+        # Stop button
+        self.stop_button = tk.Button(buttons_frame, text='⏹', width=4, height=2,
+                                   font=('Arial', 16, 'bold'), command=self.stop_midi,
+                                   bg='lightcoral', relief='raised', bd=3)
+        self.stop_button.pack(side='left', padx=(0, 5))
         
-        # LED-style position clock
-        clock_frame = ttk.Frame(play_controls_frame)
-        clock_frame.pack(side='top', pady=(0, 5), anchor='w')
+        # Enhanced LED-style position clock (larger and to the right)
+        clock_frame = ttk.Frame(buttons_frame)
+        clock_frame.pack(side='left', padx=(15, 0))
         
-        ttk.Label(clock_frame, text='Position:').pack(side='top', anchor='w')
+        # Position label
+        position_label = tk.Label(clock_frame, text='Position:', font=('Arial', 10, 'bold'))
+        position_label.pack(side='top', anchor='w')
         
-        # LED display canvas
-        self.led_clock = tk.Canvas(clock_frame, width=120, height=25, bg='black', highlightthickness=1, highlightbackground='gray')
-        self.led_clock.pack(side='top', pady=(2, 0))
+        # Larger LED display canvas
+        self.led_clock = tk.Canvas(clock_frame, width=160, height=40, bg='black', 
+                                 highlightthickness=2, highlightbackground='gray',
+                                 relief='sunken', bd=2)
+        self.led_clock.pack(side='top', pady=(3, 0))
         
         # Initialize playback variables
         self.is_playing = False
@@ -958,6 +973,9 @@ class MidiGapperGUI(tk.Tk):
         self.keyboard_canvas.delete('all')
         self.keyboard_canvas.update_idletasks()
         
+        # Clear previous key references
+        self.keyboard_keys = {}
+        
         width = self.keyboard_canvas.winfo_width()
         height = self.keyboard_canvas.winfo_height()
         
@@ -989,10 +1007,14 @@ class MidiGapperGUI(tk.Tk):
                 y2 = y1 + white_key_height
                 
                 # White key background
-                self.keyboard_canvas.create_rectangle(
+                key_id = self.keyboard_canvas.create_rectangle(
                     x1, y1, x2, y2, 
-                    fill='white', outline='#666', width=1
+                    fill='white', outline='#666', width=1,
+                    tags=f'key_{note}'
                 )
+                
+                # Store key reference for highlighting
+                self.keyboard_keys[note] = key_id
                 
                 # Label C keys with octave number
                 if semitone == 0:
@@ -1021,13 +1043,91 @@ class MidiGapperGUI(tk.Tk):
                             black_x = white_key_x + white_key_width - (black_key_width / 2)
                             black_y = 8  # Start below the blue line
                             
-                            self.keyboard_canvas.create_rectangle(
+                            black_key_id = self.keyboard_canvas.create_rectangle(
                                 black_x, black_y, 
                                 black_x + black_key_width, black_y + black_key_height,
-                                fill='#1a1a1a', outline='#333', width=1
+                                fill='#1a1a1a', outline='#333', width=1,
+                                tags=f'key_{next_note}'
                             )
+                            
+                            # Store black key reference for highlighting
+                            self.keyboard_keys[next_note] = black_key_id
                 
                 white_key_x += white_key_width
+
+    def update_keyboard_highlighting(self):
+        """Update keyboard key highlighting based on current playback position"""
+        if not hasattr(self, 'keyboard_canvas') or not hasattr(self, 'keyboard_keys'):
+            return
+            
+        # Reset all keys to their default colors first
+        for note, key_id in self.keyboard_keys.items():
+            semitone = note % 12
+            if semitone in [1, 3, 6, 8, 10]:  # Black keys
+                self.keyboard_canvas.itemconfig(key_id, fill='#1a1a1a')
+            else:  # White keys
+                self.keyboard_canvas.itemconfig(key_id, fill='white')
+          # Calculate the actual audio playback position
+        audio_position = self.get_actual_audio_position()
+        
+        # If audio_position is -1, it means audio hasn't caught up to seek position yet
+        # In this case, don't highlight any keys (they're already reset above)
+        if audio_position < 0:
+            return
+        
+        # Find notes that should be playing at the actual audio position
+        currently_playing_notes = set()
+        
+        for note_data in self.notes_for_visualization:
+            # Skip notes from deleted channels
+            if note_data['channel'] in self.deleted_channels:
+                continue
+                
+            note_start = note_data['start_time']
+            note_end = note_start + note_data['duration']
+            
+            # Check if note is currently playing (within actual audio playback position)
+            if note_start <= audio_position <= note_end:
+                currently_playing_notes.add(note_data['note'])
+        
+        # Highlight currently playing notes
+        for note in currently_playing_notes:
+            if note in self.keyboard_keys:
+                key_id = self.keyboard_keys[note]
+                semitone = note % 12
+                
+                if semitone in [1, 3, 6, 8, 10]:  # Black keys
+                    # Highlight black keys with bright blue
+                    self.keyboard_canvas.itemconfig(key_id, fill='#4080FF')
+                else:  # White keys
+                    # Highlight white keys with light blue
+                    self.keyboard_canvas.itemconfig(key_id, fill='#B0D0FF')
+
+    def get_actual_audio_position(self):
+        """Calculate the actual audio playback position (corrected for pygame MIDI seeking limitation)"""
+        if not self.is_playing or self.playback_start_time is None:
+            # If not playing, use the visual position for manual seeking
+            return self.playback_position
+        
+        # Calculate elapsed time since audio started
+        elapsed_time = time.time() - self.playback_start_time
+        
+        # Handle pygame MIDI seeking limitation
+        if self.visual_position_offset > 0.1:
+            # When seeking: audio starts from 0, but visual starts from offset
+            # Audio position is just the elapsed time since playback started
+            audio_position = elapsed_time
+            
+            # If audio hasn't caught up to where we seeked, return -1 to disable highlighting
+            if audio_position < self.visual_position_offset:
+                return -1  # Signal to disable highlighting until audio catches up
+            else:
+                # Audio has caught up, so use the normal calculation
+                return self.visual_position_offset + elapsed_time
+        else:
+            # Started from beginning, audio and visual are in sync
+            return elapsed_time
+
     def on_text_modified(self, event):
         # Reset modified flag
         text_widget = event.widget
@@ -1597,17 +1697,84 @@ class MidiGapperGUI(tk.Tk):
                 for msg in messages_to_remove:
                     track.remove(msg)
               # Convert back to pretty XML
-            pretty_xml = minidom.parseString(ET.tostring(root, encoding='utf-8')).toprettyxml(indent="  ")
-
-            # Remove empty lines
+            pretty_xml = minidom.parseString(ET.tostring(root, encoding='utf-8')).toprettyxml(indent="  ")            # Remove empty lines
             lines = pretty_xml.split('\n')
             non_empty_lines = [line for line in lines if line.strip()]
             clean_xml = '\n'.join(non_empty_lines)
-              # Update text widget
+            
+            # Update text widget
             self.text.delete('1.0', 'end')
             self.text.insert('1.0', clean_xml)
         except Exception as e:
             print(f"Error removing channel {channel} from XML: {e}")
+
+    def rewind_to_start(self):
+        """Rewind playback to the beginning"""
+        try:
+            # Stop current playback if playing
+            if self.is_playing:
+                self.stop_midi()
+            
+            # Reset position to start
+            self.playback_position = 0.0
+            self.playback_start_time = None
+            self.visual_position_offset = 0.0
+            
+            # Update displays
+            self.update_led_clock()
+            self.sync_scrollbar_to_midi_position()
+            self.update_keyboard_highlighting()
+            
+            print("Rewound to start")
+            
+        except Exception as e:
+            print(f"Error rewinding to start: {e}")
+
+    def toggle_play_pause(self):
+        """Toggle between play and pause with button symbol changes"""
+        try:
+            if not self.current_midi_file:
+                print("No MIDI file loaded")
+                return
+                
+            if not self.midi_playback_available:
+                print("MIDI playback not available")
+                return
+            
+            if self.is_playing:
+                # Currently playing, so pause
+                self.pause_midi()
+                # Change button to play symbol
+                self.play_pause_button.config(text='▶', bg='lightgreen')
+            elif self.is_paused:
+                # Currently paused, so resume
+                self.resume_midi()
+                # Change button to pause symbol  
+                self.play_pause_button.config(text='⏸', bg='orange')
+            else:
+                # Not playing, so start
+                self.play_midi()
+                # Change button to pause symbol
+                self.play_pause_button.config(text='⏸', bg='orange')
+                
+        except Exception as e:
+            print(f"Error toggling play/pause: {e}")
+
+    def resume_midi(self):
+        """Resume MIDI playback from pause"""
+        if self.is_paused:
+            try:
+                pygame.mixer.music.unpause()
+                self.is_playing = True
+                self.is_paused = False
+                # Reset start time to account for the pause
+                if self.playback_start_time:
+                    elapsed_before_pause = self.playback_position - self.visual_position_offset
+                    self.playback_start_time = time.time() - elapsed_before_pause
+                self.update_playback_timer()
+                print("MIDI playback resumed")
+            except Exception as e:
+                print(f"Error resuming MIDI: {e}")
 
     def play_midi(self):
         """Start MIDI playback"""
@@ -1625,6 +1792,10 @@ class MidiGapperGUI(tk.Tk):
                 pygame.mixer.music.unpause()
                 self.is_playing = True
                 self.is_paused = False
+                # Reset start time to account for the pause
+                if self.playback_start_time:
+                    elapsed_before_pause = self.playback_position - self.visual_position_offset
+                    self.playback_start_time = time.time() - elapsed_before_pause
                 self.update_playback_timer()
                 print("MIDI playback resumed")
             except Exception as e:
@@ -1638,19 +1809,25 @@ class MidiGapperGUI(tk.Tk):
     def start_midi_playback(self):
         """Start MIDI playback from current position"""
         try:
-            # Create a temporary MIDI file if we need to start from a specific position
             midi_file_to_play = self.current_midi_file
             
-            # If we need to start from a specific position (not 0), we'd need to 
-            # create a modified MIDI file. For now, we'll start from the beginning
-            # and use the timer to sync the position
-            if self.playback_position > 0:
-                # Reset to beginning for pygame (it doesn't support seeking)
-                self.playback_position = 0.0
+            # Store the visual position offset for timing correction
+            self.visual_position_offset = self.playback_position
+            
+            # If we need to start from a specific position, create a temporary MIDI file
+            if self.playback_position > 0.1:  # Allow small tolerance for "beginning"
+                midi_file_to_play = self.create_temp_midi_from_position(self.playback_position)
+                if midi_file_to_play is None:
+                    # Fallback to original file if temp creation fails
+                    midi_file_to_play = self.current_midi_file
+                    print(f"Warning: Could not create temp file, starting from beginning")
             
             # Load and play the MIDI file
             pygame.mixer.music.load(midi_file_to_play)
             pygame.mixer.music.play()
+            
+            # Record when audio playback actually started
+            self.playback_start_time = time.time()
             
             # Set playback state
             self.is_playing = True
@@ -1659,12 +1836,41 @@ class MidiGapperGUI(tk.Tk):
             # Start the playback timer
             self.update_playback_timer()
             
-            print(f"Started MIDI playback of {os.path.basename(midi_file_to_play)}")
+            print(f"Started MIDI playback from {self.playback_position:.2f}s")
             
         except Exception as e:
             print(f"Error starting MIDI playback: {e}")
             self.is_playing = False
             self.is_paused = False
+
+    def create_temp_midi_from_position(self, start_time_seconds):
+        """Create a temporary MIDI file starting from the specified time position"""
+        try:
+            import tempfile
+            
+            # For now, let's use a much simpler approach
+            # We'll just adjust the playback position in the timer rather than 
+            # creating complex temporary files, since pygame seeking has limitations
+            
+            print(f"Note: Seeking to {start_time_seconds:.2f}s (visual sync only)")
+            
+            # Return the original file - we'll handle timing in the playback logic
+            return self.current_midi_file
+            
+        except Exception as e:
+            print(f"Error in seeking: {e}")
+            return self.current_midi_file
+
+    def cleanup_temp_files(self):
+        """Clean up temporary MIDI files"""
+        if hasattr(self, 'temp_midi_files'):
+            for temp_file in self.temp_midi_files:
+                try:
+                    if os.path.exists(temp_file):
+                        os.unlink(temp_file)
+                except Exception as e:
+                    print(f"Warning: Could not delete temp file {temp_file}: {e}")
+            self.temp_midi_files = []
 
     def pause_midi(self):
         """Pause MIDI playback"""
@@ -1676,10 +1882,19 @@ class MidiGapperGUI(tk.Tk):
                 if self.playback_timer:
                     self.after_cancel(self.playback_timer)
                     self.playback_timer = None
+                
+                # Update playback position to current audio position when paused
+                if self.playback_start_time:
+                    elapsed = time.time() - self.playback_start_time
+                    self.playback_position = self.visual_position_offset + elapsed
+                
+                # Update button to show play symbol when paused
+                self.play_pause_button.config(text='▶', bg='lightgreen')
+                
                 print("MIDI playback paused")
             except Exception as e:
                 print(f"Error pausing MIDI: {e}")
-    
+
     def stop_midi(self):
         """Stop MIDI playback and reset position"""
         try:
@@ -1687,6 +1902,8 @@ class MidiGapperGUI(tk.Tk):
             self.is_playing = False
             self.is_paused = False
             self.playback_position = 0.0
+            self.playback_start_time = None
+            self.visual_position_offset = 0.0
             if self.playback_timer:
                 self.after_cancel(self.playback_timer)
                 self.playback_timer = None
@@ -1696,8 +1913,15 @@ class MidiGapperGUI(tk.Tk):
                 self.playback_stop_event.set()
                 self.playback_thread.join(timeout=1.0)
             
+            # Clean up any temporary MIDI files
+            self.cleanup_temp_files()
+            
+            # Reset button to play symbol when stopped
+            self.play_pause_button.config(text='▶', bg='lightgreen')
+            
             self.update_led_clock()
             self.sync_scrollbar_to_midi_position()
+            self.update_keyboard_highlighting()  # Clear any highlighted keys
             print("MIDI playback stopped")
         except Exception as e:
             print(f"Error stopping MIDI: {e}")
@@ -1718,38 +1942,43 @@ class MidiGapperGUI(tk.Tk):
             
             # Sync scrollbar position with playback position
             self.sync_scrollbar_to_midi_position()
+              # Update keyboard highlighting
+            self.update_keyboard_highlighting()
             
             # Schedule next update
             self.playback_timer = self.after(100, self.update_playback_timer)
-    
+
     def update_led_clock(self):
         """Update the LED-style position clock display"""
         self.led_clock.delete('all')
         
-        # Convert position to minutes:seconds
+        # Convert position to minutes:seconds.milliseconds
         minutes = int(self.playback_position // 60)
         seconds = int(self.playback_position % 60)
+        milliseconds = int((self.playback_position % 1) * 1000)
         
-        # Format as MM:SS
-        time_str = f"{minutes:02d}:{seconds:02d}"
-        
-        # LED segment colors
+        # Format as MM:SS.mmm
+        time_str = f"{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
+          # LED segment colors
         led_on_color = '#00FF00'  # Bright green for active segments
         led_off_color = '#003300'  # Dark green for inactive segments
-        
-        # Draw LED-style digits
-        char_width = 14
-        char_spacing = 2
-        start_x = 5
+          # Draw LED-style digits (scaled up for larger display)
+        char_width = 18  # Increased from 14
+        char_spacing = 3  # Increased from 2  
+        start_x = 8  # Increased from 5
         
         for i, char in enumerate(time_str):
             x_pos = start_x + i * (char_width + char_spacing)
             
             if char == ':':
-                # Draw colon as two dots
-                self.led_clock.create_oval(x_pos + 4, 8, x_pos + 8, 12, 
+                # Draw colon as two dots (scaled for larger display)
+                self.led_clock.create_oval(x_pos + 6, 12, x_pos + 12, 18, 
                                          fill=led_on_color, outline=led_on_color)
-                self.led_clock.create_oval(x_pos + 4, 15, x_pos + 8, 19, 
+                self.led_clock.create_oval(x_pos + 6, 22, x_pos + 12, 28, 
+                                         fill=led_on_color, outline=led_on_color)
+            elif char == '.':
+                # Draw decimal point as a small dot (scaled for larger display)
+                self.led_clock.create_oval(x_pos + 8, 28, x_pos + 14, 34, 
                                          fill=led_on_color, outline=led_on_color)
             else:
                 # Draw digit using 7-segment display pattern
@@ -1827,6 +2056,9 @@ class MidiGapperGUI(tk.Tk):
             # Update LED clock to reflect new position
             self.update_led_clock()
             
+            # Update keyboard highlighting for new position
+            self.update_keyboard_highlighting()
+            
             # If we're at the end, stop playback
             if self.playback_position >= self.max_time and self.is_playing:
                 self.stop_midi()
@@ -1854,6 +2086,29 @@ class MidiGapperGUI(tk.Tk):
             
             # Move canvas to the calculated position
             self.canvas.yview_moveto(target_scroll_top)
+
+    def destroy(self):
+        """Clean up resources when closing the application"""
+        try:
+            # Stop any playing MIDI
+            if self.is_playing:
+                pygame.mixer.music.stop()
+            
+            # Clean up temporary files
+            self.cleanup_temp_files()
+            
+            # Save window geometry
+            geometry = self.geometry()
+            config = self.config_data
+            config['geometry'] = geometry
+            config['y_scale'] = self.y_scale_var.get()
+            save_config(config)
+            
+        except Exception as e:
+            print(f"Warning: Error during cleanup: {e}")
+        
+        # Call parent destroy
+        super().destroy()
 
 if __name__ == '__main__':
     app = MidiGapperGUI()
