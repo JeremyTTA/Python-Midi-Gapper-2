@@ -83,6 +83,11 @@ class MidiGapperGUI(tk.Tk):
         self.playback_start_time = None  # When audio playback actually started
         self.visual_position_offset = 0.0  # Offset between visual and audio position
         
+        # Scrolling performance optimization for large MIDI files
+        self.scroll_update_timer = None
+        self.scroll_throttle_delay = 100  # ms delay for highlighting updates during scroll
+        self.last_highlight_time = 0  # Track when highlighting was last updated
+        
         # Load window geometry
         self.config_data = load_config()
         # Default tempo in microseconds per quarter note
@@ -341,7 +346,7 @@ class MidiGapperGUI(tk.Tk):
         self.canvas.bind('<Enter>', lambda e: self.canvas.focus_set())
         
         # Increase scroll speed by using a multiplier for faster scrolling
-        scroll_factor = 20
+        scroll_factor = 75  # Increased for better performance with large MIDI files
         self.bind_all('<MouseWheel>', lambda e: self.on_scroll_with_midi_sync('scroll', -scroll_factor * int(e.delta/120), 'units'))
         self.bind_all('<Up>', lambda e: self.on_scroll_with_midi_sync('scroll', -scroll_factor, 'units'))
         self.bind_all('<Down>', lambda e: self.on_scroll_with_midi_sync('scroll', scroll_factor, 'units'))
@@ -1121,33 +1126,58 @@ class MidiGapperGUI(tk.Tk):
                 
                 # The blue line is at the bottom edge of the visible viewport
                 # This is where notes should be highlighted (when they touch the keyboard)
-                blue_line_y = visible_bottom_y
-                
+                blue_line_y = visible_bottom_y                
                 # Use a small tolerance around the blue line for intersection
-                highlight_tolerance = 5.0  # Very tight tolerance for precise highlighting                
-                # Check each note rectangle to see if it intersects the highlighting zone
-                for tag, note_data in self.rect_data.items():
-                        # Skip notes from deleted channels
-                        if note_data.get('channel') in getattr(self, 'deleted_channels', set()):
-                            continue
+                highlight_tolerance = 5.0  # Very tight tolerance for precise highlighting
+                
+                # OPTIMIZED: Use spatial query to only check notes near the blue line
+                # This dramatically improves performance for large MIDI files
+                search_top = blue_line_y - highlight_tolerance - 50  # Extra margin for safety
+                search_bottom = blue_line_y + highlight_tolerance + 50
+                
+                # Get canvas width for the search area
+                try:
+                    canvas_width = float(self.canvas.cget('scrollregion').split()[2])
+                except:
+                    canvas_width = self.canvas.winfo_width()
+                
+                # Find only rectangles that overlap with the blue line area
+                # This is much faster than checking every single note
+                overlapping_items = self.canvas.find_overlapping(0, search_top, canvas_width, search_bottom)
+                
+                # Check only the notes found in the spatial query
+                for item in overlapping_items:
+                    try:
+                        # Get the tags for this canvas item
+                        tags = self.canvas.gettags(item)
+                        
+                        # Find the note data tag (skip system tags like 'current')
+                        note_tag = None
+                        for tag in tags:
+                            if tag in self.rect_data:
+                                note_tag = tag
+                                break
+                        
+                        if note_tag:
+                            note_data = self.rect_data[note_tag]
                             
-                        # Get the rectangle coordinates from the canvas
-                        try:
-                            # Find the note rectangles with this tag
-                            rect_items = self.canvas.find_withtag(tag)
-                            if rect_items:
-                                # Get coordinates of the first rectangle (they represent the same note)
-                                coords = self.canvas.coords(rect_items[0])
-                                if len(coords) >= 4:
-                                    rect_top_y = coords[1]  # y1
-                                    rect_bottom_y = coords[3]  # y2                                    # Check if note rectangle intersects with the blue line
-                                    # Highlight if note spans across the blue line position
-                                    if (rect_top_y <= blue_line_y + highlight_tolerance and 
-                                        rect_bottom_y >= blue_line_y - highlight_tolerance):
-                                        currently_playing_notes.add(note_data['note'])
-                        except:
-                            # If coordinate lookup fails, skip this note
-                            continue
+                            # Skip notes from deleted channels
+                            if note_data.get('channel') in getattr(self, 'deleted_channels', set()):
+                                continue
+                            
+                            # Get precise coordinates for intersection test
+                            coords = self.canvas.coords(item)
+                            if len(coords) >= 4:
+                                rect_top_y = coords[1]  # y1
+                                rect_bottom_y = coords[3]  # y2
+                                
+                                # Check if note rectangle intersects with the blue line
+                                if (rect_top_y <= blue_line_y + highlight_tolerance and 
+                                    rect_bottom_y >= blue_line_y - highlight_tolerance):
+                                    currently_playing_notes.add(note_data['note'])
+                    except:
+                        # If coordinate lookup fails, skip this note
+                        continue
                             
             except:
                 # Fallback: if visual approach fails, use audio position
@@ -2107,7 +2137,7 @@ class MidiGapperGUI(tk.Tk):
                 abs_coords.extend([x + px, py])
             
             self.led_clock.create_polygon(abs_coords, fill=color, outline=color)
-
+    
     def on_scroll_with_midi_sync(self, *args):
         """Handle scrollbar movement and sync MIDI playback position"""
         # Update canvas view first
@@ -2130,16 +2160,49 @@ class MidiGapperGUI(tk.Tk):
             
             # Update MIDI playback position
             self.playback_position = max(0.0, min(time_position, self.max_time))
-            
-            # Update LED clock to reflect new position
+              # Update LED clock immediately (lightweight)
             self.update_led_clock()
             
-            # Update keyboard highlighting for new position
-            self.update_keyboard_highlighting()
+            # Smart highlighting updates: immediate for small files, throttled for large files
+            if hasattr(self, 'rect_data') and len(self.rect_data) > 3000:
+                # Large file: Use throttling but allow periodic updates during continuous scrolling
+                if hasattr(self, 'scroll_update_timer') and self.scroll_update_timer:
+                    # Check if enough time has passed for a periodic update during scroll
+                    current_time = time.time()
+                    if not hasattr(self, 'last_highlight_time'):
+                        self.last_highlight_time = 0
+                    
+                    # Allow highlighting every 200ms during continuous scrolling
+                    if current_time - self.last_highlight_time > 0.2:
+                        self.update_keyboard_highlighting()
+                        self.last_highlight_time = current_time
+                        # Cancel the pending timer since we just updated
+                        self.after_cancel(self.scroll_update_timer)
+                        self.scroll_update_timer = None
+                    else:
+                        # Still within the 200ms window, keep the existing timer
+                        pass
+                else:
+                    # No pending timer, schedule immediate update for large files
+                    self.update_keyboard_highlighting()
+                    self.last_highlight_time = time.time()
+                
+                # Always schedule a final update when scrolling stops
+                if hasattr(self, 'scroll_update_timer') and self.scroll_update_timer:
+                    self.after_cancel(self.scroll_update_timer)
+                self.scroll_update_timer = self.after(self.scroll_throttle_delay, self.delayed_highlight_update)
+            else:
+                # Small file: Update immediately for responsive feel
+                self.update_keyboard_highlighting()
             
             # If we're at the end, stop playback
             if self.playback_position >= self.max_time and self.is_playing:
                 self.stop_midi()
+    
+    def delayed_highlight_update(self):
+        """Update keyboard highlighting after scroll throttle delay"""
+        self.update_keyboard_highlighting()
+        self.scroll_update_timer = None
 
     def sync_scrollbar_to_midi_position(self):
         """Update scrollbar position to match current MIDI playback position"""
