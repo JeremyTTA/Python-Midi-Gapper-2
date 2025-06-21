@@ -337,13 +337,20 @@ class MidiGapperGUI(tk.Tk):
         # Redraw keyboard on resize
         def on_keyboard_configure(event):
             self.draw_keyboard()
-        self.keyboard_canvas.bind('<Configure>', on_keyboard_configure)
-        # Enable scrolling of visualization with mouse wheel and arrow keys
-        self.canvas.bind('<Enter>', lambda e: self.canvas.focus_set())        # Increase scroll speed by using a multiplier for faster scrolling
+        self.keyboard_canvas.bind('<Configure>', on_keyboard_configure)        # Enable scrolling of visualization with mouse wheel and arrow keys
+        self.canvas.bind('<Enter>', lambda e: self.canvas.focus_set())
+        
+        # Increase scroll speed by using a multiplier for faster scrolling
         scroll_factor = 20
-        self.bind_all('<MouseWheel>', lambda e: self.canvas.yview_scroll(-scroll_factor * int(e.delta/120), 'units'))
-        self.bind_all('<Up>', lambda e: self.canvas.yview_scroll(-scroll_factor, 'units'))
-        self.bind_all('<Down>', lambda e: self.canvas.yview_scroll(scroll_factor, 'units'))
+        self.bind_all('<MouseWheel>', lambda e: self.on_scroll_with_midi_sync('scroll', -scroll_factor * int(e.delta/120), 'units'))
+        self.bind_all('<Up>', lambda e: self.on_scroll_with_midi_sync('scroll', -scroll_factor, 'units'))
+        self.bind_all('<Down>', lambda e: self.on_scroll_with_midi_sync('scroll', scroll_factor, 'units'))
+        
+        # Add left/right arrow keys for time-based seeking
+        self.bind_all('<Left>', lambda e: self.seek_relative(-1.0))
+        self.bind_all('<Right>', lambda e: self.seek_relative(1.0))
+        self.bind_all('<Shift-Left>', lambda e: self.seek_relative(-5.0))
+        self.bind_all('<Shift-Right>', lambda e: self.seek_relative(5.0))
         
         # Text screen tab
         text_frame = ttk.Frame(notebook)
@@ -395,8 +402,7 @@ class MidiGapperGUI(tk.Tk):
             
             # Only collapse if mouse is actually outside the frame
             if not (frame_x <= x <= frame_x + frame_width and 
-                   frame_y <= y <= frame_y + frame_height):
-                self.channel_canvas.configure(height=self.collapsed_height)
+                   frame_y <= y <= frame_y + frame_height):                self.channel_canvas.configure(height=self.collapsed_height)
         else:
             self.channel_canvas.configure(height=self.collapsed_height)
 
@@ -430,50 +436,83 @@ class MidiGapperGUI(tk.Tk):
         # Track visibility: show all channels by default
         self.visible_channels = set(channels)
         self.update_channel_legend()
-        # XML conversion - clean format without abs_time and duration attributes
-        def format_abs(sec):
-            m = int(sec // 60)
-            s = sec - m*60
-            return f"{m:02d}:{s:05.3f}"
-        def format_dur(sec):
-            return f"{sec:05.3f}"
-        # Prepare visualization data
+        
+        # FIXED: Process all tracks with global tempo handling
         self.notes_for_visualization = []
-        # Build XML root
-        root = ET.Element('MidiFile', ticks_per_beat=str(mf.ticks_per_beat))
-        print(f"MIDI file has {len(mf.tracks)} tracks")
+        
+        # First pass: collect all tempo changes with global timing
+        tempo_changes = []
+        global_time = 0.0
+        current_tempo = 500000  # Default tempo
+        
+        # Process all tracks to find tempo changes
+        for track in mf.tracks:
+            track_time = 0.0
+            for msg in track:
+                delta = mido.tick2second(msg.time, mf.ticks_per_beat, current_tempo)
+                track_time += delta
+                global_time = max(global_time, track_time)
+                
+                if msg.is_meta and msg.type == 'set_tempo':
+                    tempo_changes.append({
+                        'time': track_time,
+                        'tempo': msg.tempo
+                    })
+                    current_tempo = msg.tempo  # Update current tempo
+        
+        # Sort tempo changes by time
+        tempo_changes.sort(key=lambda x: x['time'])
+        
+        # Function to get tempo at specific time
+        def get_tempo_at_time(time):
+            tempo = 500000  # Default
+            for change in tempo_changes:
+                if change['time'] <= time:
+                    tempo = change['tempo']
+                else:
+                    break
+            return tempo
+        
+        # Second pass: process notes with correct tempo handling
         for i, track in enumerate(mf.tracks):
             print(f"Processing track {i}: {len(track)} messages")
-            tr_elem = ET.SubElement(root, 'Track', name=track.name or f'Track_{i}')
             abs_time = 0.0
-            tempo = 500000
             active_on = {}
-            msg_count = 0
+            
             for msg in track:
-                msg_count += 1                # accumulate real time
-                delta = mido.tick2second(msg.time, mf.ticks_per_beat, tempo)
+                # Get current tempo for this time point
+                current_tempo = get_tempo_at_time(abs_time)
+                
+                # Calculate delta time with correct tempo
+                delta = mido.tick2second(msg.time, mf.ticks_per_beat, current_tempo)
                 abs_time += delta
-                if msg.is_meta and msg.type == 'set_tempo':
-                    tempo = msg.tempo
-                attrs = msg.dict()
-                msg_elem = ET.SubElement(tr_elem, 'Message', type=msg.type, time=str(msg.time))
-                # set standard attributes
-                for attr, value in attrs.items():
-                    if attr not in ('type', 'time'):
-                        msg_elem.set(attr, str(value))
-                # note_on: record for duration calculation but don't add abs_time to XML
+                
+                # Handle note events
                 if msg.type == 'note_on' and getattr(msg, 'velocity', 0) > 0:
-                    active_on[(msg.channel, msg.note)] = (msg_elem, abs_time)
-                # note_off: calculate duration but don't add to XML
+                    active_on[(msg.channel, msg.note)] = abs_time
                 elif msg.type == 'note_off' or (msg.type == 'note_on' and getattr(msg, 'velocity', 0) == 0):
                     key = (getattr(msg, 'channel', None), getattr(msg, 'note', None))
                     if key in active_on:
-                        start_elem, start_time = active_on.pop(key)
+                        start_time = active_on.pop(key)
                         duration = abs_time - start_time
-                        # Record raw note data for visualization (but don't add duration to XML)
-                        self.notes_for_visualization.append({'start_time': start_time, 'note': key[1], 'channel': key[0], 'duration': duration})
-            print(f"Track {i} processed {msg_count} messages, XML has {len(tr_elem)} child elements")
-        print(f"Final XML root has {len(root)} tracks")
+                        self.notes_for_visualization.append({
+                            'start_time': start_time, 
+                            'note': key[1], 
+                            'channel': key[0], 
+                            'duration': duration
+                        })
+        
+        # Build XML for display (using simplified approach)
+        root = ET.Element('MidiFile', ticks_per_beat=str(mf.ticks_per_beat))
+        for i, track in enumerate(mf.tracks):
+            tr_elem = ET.SubElement(root, 'Track', name=track.name or f'Track_{i}')
+            for msg in track:
+                attrs = msg.dict()
+                msg_elem = ET.SubElement(tr_elem, 'Message', type=msg.type, time=str(msg.time))
+                for attr, value in attrs.items():
+                    if attr not in ('type', 'time'):
+                        msg_elem.set(attr, str(value))
+        
         pretty_xml = minidom.parseString(ET.tostring(root, encoding='utf-8')).toprettyxml(indent="  ")
         self.text.insert('end', pretty_xml)
         
@@ -487,9 +526,9 @@ class MidiGapperGUI(tk.Tk):
         except Exception as e:
             print(f"Failed to save XML file: {e}")
         
-        # Populate visualization notes from processed MIDI data (mido-based for accurate durations)
+        # Populate visualization notes from processed MIDI data
         self.notes = [(d['start_time'], d['note'], d['channel'], d['duration']) for d in self.notes_for_visualization]
-        self.max_time = max((d['start_time'] + d['duration'] for d in self.notes_for_visualization), default=1)        # Update the MIDI info labels with detailed information
+        self.max_time = max((d['start_time'] + d['duration'] for d in self.notes_for_visualization), default=1)# Update the MIDI info labels with detailed information
         fname = os.path.basename(file_path)
         
         # Get MIDI format type (0, 1, or 2)
@@ -1069,8 +1108,7 @@ class MidiGapperGUI(tk.Tk):
                 self.keyboard_canvas.itemconfig(key_id, fill='white')
           # Calculate the actual audio playback position
         audio_position = self.get_actual_audio_position()
-        
-        # If audio_position is -1, it means audio hasn't caught up to seek position yet
+          # If audio_position is -1, it means audio hasn't caught up to seek position yet
         # In this case, don't highlight any keys (they're already reset above)
         if audio_position < 0:
             return
@@ -1111,8 +1149,7 @@ class MidiGapperGUI(tk.Tk):
         
         # Calculate elapsed time since audio started
         elapsed_time = time.time() - self.playback_start_time
-        
-        # Handle pygame MIDI seeking limitation
+          # Handle pygame MIDI seeking limitation
         if self.visual_position_offset > 0.1:
             # When seeking: audio starts from 0, but visual starts from offset
             # Audio position is just the elapsed time since playback started
@@ -1123,10 +1160,12 @@ class MidiGapperGUI(tk.Tk):
                 return -1  # Signal to disable highlighting until audio catches up
             else:
                 # Audio has caught up, so use the normal calculation
-                return self.visual_position_offset + elapsed_time
+                audio_pos = self.visual_position_offset + elapsed_time
+                return audio_pos
         else:
             # Started from beginning, audio and visual are in sync
-            return elapsed_time
+            audio_pos = elapsed_time
+            return audio_pos
 
     def on_text_modified(self, event):
         # Reset modified flag
@@ -1812,15 +1851,20 @@ class MidiGapperGUI(tk.Tk):
             midi_file_to_play = self.current_midi_file
             
             # Store the visual position offset for timing correction
-            self.visual_position_offset = self.playback_position
-            
-            # If we need to start from a specific position, create a temporary MIDI file
+            # Only set offset if we're actually starting from a non-zero position
             if self.playback_position > 0.1:  # Allow small tolerance for "beginning"
+                self.visual_position_offset = self.playback_position
+                # Create a temporary MIDI file starting from the specified position
                 midi_file_to_play = self.create_temp_midi_from_position(self.playback_position)
                 if midi_file_to_play is None:
                     # Fallback to original file if temp creation fails
                     midi_file_to_play = self.current_midi_file
+                    self.visual_position_offset = 0.0  # Reset offset since we're using original file
                     print(f"Warning: Could not create temp file, starting from beginning")
+            else:
+                # Starting from beginning - no offset needed
+                self.visual_position_offset = 0.0
+                self.playback_position = 0.0  # Ensure we start from exactly 0
             
             # Load and play the MIDI file
             pygame.mixer.music.load(midi_file_to_play)
@@ -1859,7 +1903,7 @@ class MidiGapperGUI(tk.Tk):
             
         except Exception as e:
             print(f"Error in seeking: {e}")
-            return self.current_midi_file
+            return self.current_midi_filei
 
     def cleanup_temp_files(self):
         """Clean up temporary MIDI files"""
@@ -1925,12 +1969,13 @@ class MidiGapperGUI(tk.Tk):
             print("MIDI playback stopped")
         except Exception as e:
             print(f"Error stopping MIDI: {e}")
-    
+
     def update_playback_timer(self):
         """Update playback position and schedule next update"""
-        if self.is_playing and not self.is_paused:
-            # Advance playback position (update every 100ms)
-            self.playback_position += 0.1
+        if self.is_playing and not self.is_paused:            # Calculate accurate playback position based on elapsed time
+            if self.playback_start_time is not None:
+                elapsed_time = time.time() - self.playback_start_time
+                self.playback_position = self.visual_position_offset + elapsed_time
             
             # Check if we've reached the end
             if hasattr(self, 'max_time') and self.playback_position >= self.max_time:
@@ -1945,8 +1990,8 @@ class MidiGapperGUI(tk.Tk):
               # Update keyboard highlighting
             self.update_keyboard_highlighting()
             
-            # Schedule next update
-            self.playback_timer = self.after(100, self.update_playback_timer)
+            # Schedule next update (faster update for smoother highlighting)
+            self.playback_timer = self.after(50, self.update_playback_timer)
 
     def update_led_clock(self):
         """Update the LED-style position clock display"""
@@ -2086,6 +2131,32 @@ class MidiGapperGUI(tk.Tk):
             
             # Move canvas to the calculated position
             self.canvas.yview_moveto(target_scroll_top)
+
+    def seek_relative(self, delta_seconds):
+        """Seek relative to current position by the specified number of seconds"""
+        if not hasattr(self, 'max_time') or self.max_time <= 0:
+            return
+            
+        # Calculate new position
+        new_position = max(0.0, min(self.playback_position + delta_seconds, self.max_time))
+        
+        # Update playback position
+        self.playback_position = new_position
+        
+        # If currently playing, handle seeking
+        if self.is_playing:
+            # Set visual offset for pygame seeking limitation
+            self.visual_position_offset = new_position
+            self.playback_start_time = time.time()
+            
+        # Update scrollbar to match new position
+        self.sync_scrollbar_to_midi_position()
+        
+        # Update LED clock
+        self.update_led_clock()
+        
+        # Update keyboard highlighting
+        self.update_keyboard_highlighting()
 
     def destroy(self):
         """Clean up resources when closing the application"""
