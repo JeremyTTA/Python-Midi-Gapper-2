@@ -11,6 +11,9 @@ import traceback
 from tkinter import messagebox
 from mido import MidiFile, MidiTrack
 import tkinter.font as tkfont
+import pygame
+import threading
+import time
 
 # Predefined distinct colors for channels
 DEFAULT_CHANNEL_COLORS = [    '#e6194b', '#3cb44b', '#ffe119', '#4363d8', '#f58231', '#911eb4',
@@ -63,6 +66,21 @@ class MidiGapperGUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title('Python Midi Gapper 2')
+        
+        # Initialize pygame mixer for MIDI playback
+        try:
+            pygame.mixer.pre_init(frequency=22050, size=-16, channels=2, buffer=1024)
+            pygame.mixer.init()
+            self.midi_playback_available = True
+            print("Pygame mixer initialized for MIDI playback")
+        except Exception as e:
+            print(f"Warning: Could not initialize pygame mixer: {e}")
+            self.midi_playback_available = False
+        
+        # MIDI playback state
+        self.playback_thread = None
+        self.playback_stop_event = threading.Event()
+        self.current_playback_file = None
         
         # Load window geometry
         self.config_data = load_config()
@@ -146,10 +164,46 @@ class MidiGapperGUI(tk.Tk):
         self.gap_var = tk.StringVar(value='50')
         gap_entry = ttk.Entry(gap_frame, textvariable=self.gap_var, width=6)
         gap_entry.pack(side='left')
-        
-        # Create Gaps button
+          # Create Gaps button
         create_gaps_button = ttk.Button(gap_controls_frame, text='Create Gaps', command=self.create_gaps)
-        create_gaps_button.pack(side='top', pady=(0, 5), anchor='w')        # Center: MIDI info display
+        create_gaps_button.pack(side='top', pady=(0, 5), anchor='w')
+        
+        # MIDI Play Controls
+        play_controls_frame = ttk.LabelFrame(top_section, text='MIDI Player')
+        play_controls_frame.pack(side='left', anchor='nw', padx=(10, 10))
+        
+        # Play control buttons
+        buttons_frame = ttk.Frame(play_controls_frame)
+        buttons_frame.pack(side='top', pady=(5, 5), anchor='w')
+        
+        self.play_button = ttk.Button(buttons_frame, text='▶', width=3, command=self.play_midi)
+        self.play_button.pack(side='left', padx=(0, 2))
+        
+        self.pause_button = ttk.Button(buttons_frame, text='⏸', width=3, command=self.pause_midi)
+        self.pause_button.pack(side='left', padx=(0, 2))
+        
+        self.stop_button = ttk.Button(buttons_frame, text='⏹', width=3, command=self.stop_midi)
+        self.stop_button.pack(side='left', padx=(0, 2))
+        
+        # LED-style position clock
+        clock_frame = ttk.Frame(play_controls_frame)
+        clock_frame.pack(side='top', pady=(0, 5), anchor='w')
+        
+        ttk.Label(clock_frame, text='Position:').pack(side='top', anchor='w')
+        
+        # LED display canvas
+        self.led_clock = tk.Canvas(clock_frame, width=120, height=25, bg='black', highlightthickness=1, highlightbackground='gray')
+        self.led_clock.pack(side='top', pady=(2, 0))
+        
+        # Initialize playback variables
+        self.is_playing = False
+        self.is_paused = False
+        self.playback_position = 0.0
+        self.playback_timer = None
+        
+        # Draw initial LED display
+        self.update_led_clock()
+        # Center: MIDI info display
         info_frame = ttk.Frame(top_section)
         info_frame.pack(side='left', expand=True, fill='x', padx=(0, 10))
         
@@ -254,9 +308,8 @@ class MidiGapperGUI(tk.Tk):
           # Keyboard canvas underneath (fixed height, Synthesia style) - 2x scale
         self.keyboard_canvas = tk.Canvas(main_canvas_frame, bg='#2a2a2a', height=200)
         self.keyboard_canvas.pack(fill='x', side='bottom')
-        
-        # Vertical scrollbar for visualization only
-        v_scroll = ttk.Scrollbar(canvas_container, orient='vertical', command=self.canvas.yview)
+          # Vertical scrollbar for visualization with MIDI position sync
+        v_scroll = ttk.Scrollbar(canvas_container, orient='vertical', command=self.on_scroll_with_midi_sync)
         v_scroll.pack(fill='y', side='right')
         self.canvas.configure(yscrollcommand=v_scroll.set)
           # Redraw visualization on canvas resize (fix autoload sizing issues)
@@ -1545,19 +1598,262 @@ class MidiGapperGUI(tk.Tk):
                     track.remove(msg)
               # Convert back to pretty XML
             pretty_xml = minidom.parseString(ET.tostring(root, encoding='utf-8')).toprettyxml(indent="  ")
-            
+
             # Remove empty lines
             lines = pretty_xml.split('\n')
             non_empty_lines = [line for line in lines if line.strip()]
             clean_xml = '\n'.join(non_empty_lines)
-            
-            # Update text widget
+              # Update text widget
             self.text.delete('1.0', 'end')
             self.text.insert('1.0', clean_xml)
-            
         except Exception as e:
             print(f"Error removing channel {channel} from XML: {e}")
 
+    def play_midi(self):
+        """Start MIDI playback"""
+        if not self.current_midi_file:
+            print("No MIDI file loaded")
+            return
+            
+        if not self.midi_playback_available:
+            print("MIDI playback not available")
+            return
+            
+        if self.is_paused:
+            # Resume from pause
+            try:
+                pygame.mixer.music.unpause()
+                self.is_playing = True
+                self.is_paused = False
+                self.update_playback_timer()
+                print("MIDI playback resumed")
+            except Exception as e:
+                print(f"Error resuming MIDI: {e}")
+        else:
+            # Start from beginning or current position
+            self.start_midi_playback()
+        
+        print(f"MIDI playback started at position {self.playback_position:.2f}s")
+
+    def start_midi_playback(self):
+        """Start MIDI playback from current position"""
+        try:
+            # Create a temporary MIDI file if we need to start from a specific position
+            midi_file_to_play = self.current_midi_file
+            
+            # If we need to start from a specific position (not 0), we'd need to 
+            # create a modified MIDI file. For now, we'll start from the beginning
+            # and use the timer to sync the position
+            if self.playback_position > 0:
+                # Reset to beginning for pygame (it doesn't support seeking)
+                self.playback_position = 0.0
+            
+            # Load and play the MIDI file
+            pygame.mixer.music.load(midi_file_to_play)
+            pygame.mixer.music.play()
+            
+            # Set playback state
+            self.is_playing = True
+            self.is_paused = False
+            
+            # Start the playback timer
+            self.update_playback_timer()
+            
+            print(f"Started MIDI playback of {os.path.basename(midi_file_to_play)}")
+            
+        except Exception as e:
+            print(f"Error starting MIDI playback: {e}")
+            self.is_playing = False
+            self.is_paused = False
+
+    def pause_midi(self):
+        """Pause MIDI playback"""
+        if self.is_playing:
+            try:
+                pygame.mixer.music.pause()
+                self.is_playing = False
+                self.is_paused = True
+                if self.playback_timer:
+                    self.after_cancel(self.playback_timer)
+                    self.playback_timer = None
+                print("MIDI playback paused")
+            except Exception as e:
+                print(f"Error pausing MIDI: {e}")
+    
+    def stop_midi(self):
+        """Stop MIDI playback and reset position"""
+        try:
+            pygame.mixer.music.stop()
+            self.is_playing = False
+            self.is_paused = False
+            self.playback_position = 0.0
+            if self.playback_timer:
+                self.after_cancel(self.playback_timer)
+                self.playback_timer = None
+            
+            # Stop playback thread if running
+            if self.playback_thread and self.playback_thread.is_alive():
+                self.playback_stop_event.set()
+                self.playback_thread.join(timeout=1.0)
+            
+            self.update_led_clock()
+            self.sync_scrollbar_to_midi_position()
+            print("MIDI playback stopped")
+        except Exception as e:
+            print(f"Error stopping MIDI: {e}")
+    
+    def update_playback_timer(self):
+        """Update playback position and schedule next update"""
+        if self.is_playing and not self.is_paused:
+            # Advance playback position (update every 100ms)
+            self.playback_position += 0.1
+            
+            # Check if we've reached the end
+            if hasattr(self, 'max_time') and self.playback_position >= self.max_time:
+                self.stop_midi()
+                return
+            
+            # Update LED display
+            self.update_led_clock()
+            
+            # Sync scrollbar position with playback position
+            self.sync_scrollbar_to_midi_position()
+            
+            # Schedule next update
+            self.playback_timer = self.after(100, self.update_playback_timer)
+    
+    def update_led_clock(self):
+        """Update the LED-style position clock display"""
+        self.led_clock.delete('all')
+        
+        # Convert position to minutes:seconds
+        minutes = int(self.playback_position // 60)
+        seconds = int(self.playback_position % 60)
+        
+        # Format as MM:SS
+        time_str = f"{minutes:02d}:{seconds:02d}"
+        
+        # LED segment colors
+        led_on_color = '#00FF00'  # Bright green for active segments
+        led_off_color = '#003300'  # Dark green for inactive segments
+        
+        # Draw LED-style digits
+        char_width = 14
+        char_spacing = 2
+        start_x = 5
+        
+        for i, char in enumerate(time_str):
+            x_pos = start_x + i * (char_width + char_spacing)
+            
+            if char == ':':
+                # Draw colon as two dots
+                self.led_clock.create_oval(x_pos + 4, 8, x_pos + 8, 12, 
+                                         fill=led_on_color, outline=led_on_color)
+                self.led_clock.create_oval(x_pos + 4, 15, x_pos + 8, 19, 
+                                         fill=led_on_color, outline=led_on_color)
+            else:
+                # Draw digit using 7-segment display pattern
+                self.draw_led_digit(x_pos, char, led_on_color, led_off_color)
+
+    def draw_led_digit(self, x, digit, on_color, off_color):
+        """Draw a single LED digit using 7-segment display pattern"""
+        # 7-segment display patterns for digits 0-9
+        segments = {
+            '0': [1, 1, 1, 1, 1, 1, 0],  # top, top-right, bottom-right, bottom, bottom-left, top-left, middle
+            '1': [0, 1, 1, 0, 0, 0, 0],
+            '2': [1, 1, 0, 1, 1, 0, 1],
+            '3': [1, 1, 1, 1, 0, 0, 1],
+            '4': [0, 1, 1, 0, 0, 1, 1],
+            '5': [1, 0, 1, 1, 0, 1, 1],
+            '6': [1, 0, 1, 1, 1, 1, 1],
+            '7': [1, 1, 1, 0, 0, 0, 0],
+            '8': [1, 1, 1, 1, 1, 1, 1],
+            '9': [1, 1, 1, 1, 0, 1, 1]
+        }
+        
+        pattern = segments.get(digit, [0, 0, 0, 0, 0, 0, 0])
+        
+        # Segment coordinates (relative to x position)
+        seg_coords = [
+            # top
+            [(2, 3), (10, 3), (9, 4), (3, 4)],
+            # top-right  
+            [(10, 4), (11, 5), (11, 11), (10, 12)],
+            # bottom-right
+            [(10, 13), (11, 14), (11, 20), (10, 21)],
+            # bottom
+            [(2, 21), (10, 21), (9, 20), (3, 20)],
+            # bottom-left
+            [(2, 13), (3, 14), (3, 20), (2, 21)],
+            # top-left
+            [(2, 4), (3, 5), (3, 11), (2, 12)],
+            # middle
+            [(3, 12), (9, 12), (9, 13), (3, 13)]
+        ]
+        
+        # Draw each segment
+        for i, coords in enumerate(seg_coords):
+            color = on_color if pattern[i] else off_color
+            # Convert relative coordinates to absolute
+            abs_coords = []
+            for px, py in coords:
+                abs_coords.extend([x + px, py])
+            
+            self.led_clock.create_polygon(abs_coords, fill=color, outline=color)
+
+    def on_scroll_with_midi_sync(self, *args):
+        """Handle scrollbar movement and sync MIDI playback position"""
+        # Update canvas view first
+        self.canvas.yview(*args)
+        
+        # Calculate MIDI position based on scroll position
+        if hasattr(self, 'max_time') and self.max_time > 0:
+            # Get current scroll position (0.0 to 1.0)
+            scroll_top, scroll_bottom = self.canvas.yview()
+            
+            # In the visualization, time flows from bottom to top
+            # Y coordinate mapping: y = total_height - (t / max_time) * total_height
+            # So: t = 0 is at y = total_height (bottom)
+            #     t = max_time is at y = 0 (top)
+            
+            # Calculate the time position based on the bottom of the visible area
+            # When scroll_bottom = 1.0 (at bottom), we want time = 0
+            # When scroll_top = 0.0 (at top), we want time = max_time
+            time_position = (1.0 - scroll_bottom) * self.max_time
+            
+            # Update MIDI playback position
+            self.playback_position = max(0.0, min(time_position, self.max_time))
+            
+            # Update LED clock to reflect new position
+            self.update_led_clock()
+            
+            # If we're at the end, stop playback
+            if self.playback_position >= self.max_time and self.is_playing:
+                self.stop_midi()
+
+    def sync_scrollbar_to_midi_position(self):
+        """Update scrollbar position to match current MIDI playback position"""
+        if hasattr(self, 'max_time') and self.max_time > 0:
+            # Calculate scroll position from MIDI position
+            # We want: playback_position 0.0 → scroll_bottom = 1.0 (at bottom)
+            #          playback_position max_time → scroll_bottom = visible_height (at top)
+            
+            # For simplicity, position the playback time at the bottom of the visible area
+            # scroll_bottom = 1.0 - (playback_position / max_time)
+            target_scroll_bottom = 1.0 - (self.playback_position / self.max_time)
+            
+            # Get current view height
+            current_top, current_bottom = self.canvas.yview()
+            view_height = current_bottom - current_top
+            
+            # Calculate where the top should be to put playback_position at bottom
+            target_scroll_top = target_scroll_bottom - view_height
+            
+            # Clamp to valid range
+            target_scroll_top = max(0.0, min(1.0 - view_height, target_scroll_top))
+            
+            # Move canvas to the calculated position
+            self.canvas.yview_moveto(target_scroll_top)
 
 if __name__ == '__main__':
     app = MidiGapperGUI()
