@@ -91,13 +91,15 @@ class MidiGapperGUI(tk.Tk):
         # Load window geometry
         self.config_data = load_config()
         # Default tempo in microseconds per quarter note
-        self.tempo_us = 500000
-        # Y-scale multiplier for visualization
+        self.tempo_us = 500000        # Y-scale multiplier for visualization
         y_scale = self.config_data.get('y_scale', 1.0)
         self.y_scale_var = tk.DoubleVar(value=y_scale)
+        
         geometry = self.config_data.get('geometry')
         if geometry:
-            self.geometry(geometry)        # Initialize state
+            self.geometry(geometry)
+            
+        # Initialize state
         self.current_midi_file = None
         self.midi_data = None
         self.deleted_channels = set()
@@ -117,10 +119,11 @@ class MidiGapperGUI(tk.Tk):
         # Define visualization text font with default size for clarity
         default_font = tkfont.nametofont("TkDefaultFont")
         new_size = default_font.cget("size")  # use standard size
-        self.vis_font = tkfont.Font(family=default_font.cget("family"), size=new_size)
-        # Initialize channel-color and instrument mapping
+        self.vis_font = tkfont.Font(family=default_font.cget("family"), size=new_size)        # Initialize channel-color and instrument mapping
         self.channel_colors = {}
-        self.channel_instruments = {}        # Autoload last MIDI file if available
+        self.channel_instruments = {}
+        
+        # Autoload last MIDI file if available
         last = self.config_data.get('last_midi')
         if last and os.path.exists(last):
             # Delay autoload until GUI is complete and force scroll to bottom
@@ -137,6 +140,12 @@ class MidiGapperGUI(tk.Tk):
                 self.after(300, force_scroll)
                 self.after(500, force_scroll)
             self.after_idle(delayed_autoload)
+        
+        # Restore window state (maximized/normal) after widgets are created
+        window_state = self.config_data.get('window_state', 'normal')
+        if window_state == 'zoomed':  # 'zoomed' is Tkinter's term for maximized
+            self.state('zoomed')
+            
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def create_widgets(self):
@@ -1243,15 +1252,15 @@ class MidiGapperGUI(tk.Tk):
                 try:
                     root = ET.fromstring(xml_str)
                     # Always rebuild visualization from the current XML
-                    # This ensures gaps and other modifications are reflected
-                    self.rebuild_notes_from_xml(root)
+                    # This ensures gaps and other modifications are reflected                    self.rebuild_notes_from_xml(root)
                 except Exception as e:
                     print(f"Error parsing XML for visualization: {e}")
                     return
 
     def on_closing(self):
-        # Save window geometry and Y-scale
+        # Save window geometry and state
         self.config_data['geometry'] = self.geometry()
+        self.config_data['window_state'] = self.state()  # Save window state (normal/zoomed)
         self.config_data['y_scale'] = self.y_scale_var.get()
         save_config(self.config_data)
         self.destroy()
