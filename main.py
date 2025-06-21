@@ -1095,7 +1095,7 @@ class MidiGapperGUI(tk.Tk):
                 white_key_x += white_key_width
 
     def update_keyboard_highlighting(self):
-        """Update keyboard key highlighting based on current playback position"""
+        """Update keyboard key highlighting based on notes visible in current viewport"""
         if not hasattr(self, 'keyboard_canvas') or not hasattr(self, 'keyboard_keys'):
             return
             
@@ -1105,28 +1105,61 @@ class MidiGapperGUI(tk.Tk):
             if semitone in [1, 3, 6, 8, 10]:  # Black keys
                 self.keyboard_canvas.itemconfig(key_id, fill='#1a1a1a')
             else:  # White keys
-                self.keyboard_canvas.itemconfig(key_id, fill='white')
-          # Calculate the actual audio playback position
-        audio_position = self.get_actual_audio_position()
-          # If audio_position is -1, it means audio hasn't caught up to seek position yet
-        # In this case, don't highlight any keys (they're already reset above)
-        if audio_position < 0:
-            return
-        
-        # Find notes that should be playing at the actual audio position
+                self.keyboard_canvas.itemconfig(key_id, fill='white')        # IMPROVED: Use visual rectangle positions for accurate highlighting
+        # This eliminates all coordinate mapping errors and timing drift issues
         currently_playing_notes = set()
         
-        for note_data in self.notes_for_visualization:
-            # Skip notes from deleted channels
-            if note_data['channel'] in self.deleted_channels:
-                continue
+        if hasattr(self, 'canvas') and hasattr(self, 'rect_data'):
+            try:
+                # FIXED: Use direct canvas coordinate methods to eliminate drift
+                # Get the actual visible area using canvas methods that don't drift
+                canvas_height = self.canvas.winfo_height()
                 
-            note_start = note_data['start_time']
-            note_end = note_start + note_data['duration']
-            
-            # Check if note is currently playing (within actual audio playback position)
-            if note_start <= audio_position <= note_end:
-                currently_playing_notes.add(note_data['note'])
+                # Get the top-left corner of the visible area in canvas coordinates
+                visible_top_y = self.canvas.canvasy(0)  # Top of visible area
+                visible_bottom_y = self.canvas.canvasy(canvas_height)  # Bottom of visible area
+                
+                # The blue line is at the bottom edge of the visible viewport
+                # This is where notes should be highlighted (when they touch the keyboard)
+                blue_line_y = visible_bottom_y
+                
+                # Use a small tolerance around the blue line for intersection
+                highlight_tolerance = 5.0  # Very tight tolerance for precise highlighting                
+                # Check each note rectangle to see if it intersects the highlighting zone
+                for tag, note_data in self.rect_data.items():
+                        # Skip notes from deleted channels
+                        if note_data.get('channel') in getattr(self, 'deleted_channels', set()):
+                            continue
+                            
+                        # Get the rectangle coordinates from the canvas
+                        try:
+                            # Find the note rectangles with this tag
+                            rect_items = self.canvas.find_withtag(tag)
+                            if rect_items:
+                                # Get coordinates of the first rectangle (they represent the same note)
+                                coords = self.canvas.coords(rect_items[0])
+                                if len(coords) >= 4:
+                                    rect_top_y = coords[1]  # y1
+                                    rect_bottom_y = coords[3]  # y2                                    # Check if note rectangle intersects with the blue line
+                                    # Highlight if note spans across the blue line position
+                                    if (rect_top_y <= blue_line_y + highlight_tolerance and 
+                                        rect_bottom_y >= blue_line_y - highlight_tolerance):
+                                        currently_playing_notes.add(note_data['note'])
+                        except:
+                            # If coordinate lookup fails, skip this note
+                            continue
+                            
+            except:
+                # Fallback: if visual approach fails, use audio position
+                audio_position = self.get_actual_audio_position()
+                if audio_position >= 0:
+                    for note_data in getattr(self, 'notes_for_visualization', []):
+                        if note_data.get('channel') in getattr(self, 'deleted_channels', set()):
+                            continue
+                        note_start = note_data.get('start_time', 0)
+                        note_end = note_start + note_data.get('duration', 0)
+                        if note_start <= audio_position <= note_end:
+                            currently_playing_notes.add(note_data['note'])
         
         # Highlight currently playing notes
         for note in currently_playing_notes:
