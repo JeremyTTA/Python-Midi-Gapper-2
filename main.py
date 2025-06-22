@@ -15,38 +15,8 @@ import pygame
 import threading
 import time
 
-# Try to import FluidSynth for better MIDI playback with seeking support
-FLUIDSYNTH_AVAILABLE = False
-try:
-    import fluidsynth
-    # Test if FluidSynth can actually be used (not just imported)
-    test_settings = fluidsynth.new_fluid_settings()
-    if test_settings:
-        test_synth = fluidsynth.new_fluid_synth(test_settings)
-        if test_synth:
-            fluidsynth.delete_fluid_synth(test_synth)
-            fluidsynth.delete_fluid_settings(test_settings)
-            FLUIDSYNTH_AVAILABLE = True
-            print("✓ FluidSynth available - will use for MIDI playback with seeking support")
-        else:
-            fluidsynth.delete_fluid_settings(test_settings)
-            print("⚠ FluidSynth library found but cannot create synthesizer")
-            print("  FluidSynth binary may not be installed correctly")
-    else:
-        print("⚠ FluidSynth library found but cannot create settings")
-        print("  FluidSynth binary may not be installed correctly")
-except (ImportError, FileNotFoundError, OSError, TypeError) as e:
-    print("⚠ FluidSynth not available - falling back to pygame (no seeking)")
-    print(f"  Reason: {e}")
-    if "fluidsynth" in str(e).lower():
-        print("  To enable seeking support, install FluidSynth:")
-        print("  1. Download FluidSynth from: https://www.fluidsynth.org/download/")
-        print("  2. Or use: winget install FluidSynth.FluidSynth")
-        print("  3. Or install via conda: conda install fluidsynth")
-except Exception as e:
-    print(f"⚠ FluidSynth initialization error: {e}")
-    FLUIDSYNTH_AVAILABLE = False
-    fluidsynth = None
+# MIDI playback using pygame
+print("Using pygame for MIDI playback with temp file seeking support")
 
 # Predefined distinct colors for channels
 DEFAULT_CHANNEL_COLORS = [    '#e6194b', '#3cb44b', '#ffe119', '#4363d8', '#f58231', '#911eb4',
@@ -101,14 +71,7 @@ class MidiGapperGUI(tk.Tk):
         self.title('Python Midi Gapper 2')
         
         # Initialize MIDI playback systems
-        self.init_midi_playback()
-          # FluidSynth instance variables
-        self.fs_settings = None
-        self.fs_synth = None
-        self.fs_audio_driver = None
-        self.fs_player = None
-        self.soundfont_loaded = False
-          # MIDI playback state
+        self.init_midi_playback()          # MIDI playback state
         self.playback_thread = None
         self.playback_stop_event = threading.Event()
         self.current_playback_file = None
@@ -182,129 +145,18 @@ class MidiGapperGUI(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def init_midi_playback(self):
-        """Initialize MIDI playback systems (FluidSynth and pygame fallback)"""
+        """Initialize MIDI playback system using pygame"""
         self.midi_playback_available = False
-        self.fluidsynth_ready = False
         
-        # Always initialize pygame first as fallback
+        # Initialize pygame for MIDI playback
         try:
             pygame.mixer.pre_init(frequency=22050, size=-16, channels=2, buffer=1024)
             pygame.mixer.init()
             self.midi_playback_available = True
-            print("✓ Pygame mixer initialized for MIDI playback (fallback)")
+            print("✓ Pygame mixer initialized for MIDI playback with temp file seeking support")
         except Exception as e:
             print(f"⚠ Could not initialize pygame mixer: {e}")
             self.midi_playback_available = False
-        
-        # Try to initialize FluidSynth for better seeking support
-        if FLUIDSYNTH_AVAILABLE:
-            try:
-                self.fs_settings = fluidsynth.new_fluid_settings()
-                if self.fs_settings:
-                    print("✓ FluidSynth settings created")
-                    
-                    # Create synthesizer
-                    self.fs_synth = fluidsynth.new_fluid_synth(self.fs_settings)
-                    if self.fs_synth:
-                        # Try to create audio driver
-                        try:
-                            self.fs_audio_driver = fluidsynth.new_fluid_audio_driver(self.fs_settings, self.fs_synth)
-                            
-                            # Try to load a default soundfont
-                            self.load_default_soundfont()
-                            
-                            if self.soundfont_loaded:
-                                self.fluidsynth_ready = True
-                                print("✓ FluidSynth ready for playback with seeking support")
-                            else:
-                                print("⚠ FluidSynth initialized but no soundfont loaded")
-                                print("  Download a soundfont (e.g., FluidR3_GM.sf2) for audio playback")
-                                
-                        except Exception as e:
-                            print(f"⚠ FluidSynth audio driver failed: {e}")
-                            self.cleanup_fluidsynth()
-                    else:
-                        print("⚠ Failed to create FluidSynth synthesizer")
-                        fluidsynth.delete_fluid_settings(self.fs_settings)
-                        self.fs_settings = None
-                else:
-                    print("⚠ Failed to create FluidSynth settings")
-                    
-            except Exception as e:
-                print(f"⚠ FluidSynth initialization error: {e}")
-                self.cleanup_fluidsynth()
-
-    def load_default_soundfont(self):
-        """Try to load a default soundfont for FluidSynth"""
-        # Common soundfont locations
-        potential_soundfonts = [
-            # Windows common locations
-            "C:\\soundfonts\\FluidR3_GM.sf2",
-            "C:\\Windows\\System32\\drivers\\gm.dls",
-            # Try in current directory
-            os.path.join(os.path.dirname(__file__), "soundfont.sf2"),
-            os.path.join(os.path.dirname(__file__), "FluidR3_GM.sf2"),
-            # Try user's Documents
-            os.path.expanduser("~/Documents/soundfonts/FluidR3_GM.sf2"),
-        ]
-        
-        for sf_path in potential_soundfonts:
-            if os.path.exists(sf_path):
-                try:
-                    # Convert path to C-compatible string
-                    import ctypes
-                    sf_path_cstr = ctypes.c_char_p(sf_path.encode('utf-8'))
-                    
-                    # Suppress libinstpatch warnings during DLS loading
-                    import sys
-                    import contextlib
-                    import io
-                    
-                    # Capture stderr to suppress libinstpatch warnings
-                    stderr_backup = sys.stderr
-                    sys.stderr = io.StringIO()
-                    
-                    try:
-                        sfid = fluidsynth.fluid_synth_sfload(self.fs_synth, sf_path_cstr, 1)
-                    finally:
-                        # Restore stderr
-                        sys.stderr = stderr_backup
-                    
-                    if sfid != -1:
-                        self.soundfont_loaded = True
-                        print(f"✓ Loaded soundfont: {sf_path}")
-                        return True
-                except Exception as e:
-                    print(f"⚠ Failed to load soundfont {sf_path}: {e}")
-                    continue
-        
-        # If no soundfont found, try to create a minimal one or download
-        print("⚠ No soundfont found. For FluidSynth audio:")
-        print("  1. Download FluidR3_GM.sf2 from: https://archive.org/details/fluidr-3-gm-gs-mt-32-sound-font")
-        print("  2. Place it in: C:\\soundfonts\\FluidR3_GM.sf2")
-        print("  3. Or place it in the same directory as this script")
-        return False
-
-    def cleanup_fluidsynth(self):
-        """Clean up FluidSynth resources"""
-        try:
-            if self.fs_player:
-                fluidsynth.delete_fluid_player(self.fs_player)
-                self.fs_player = None
-            if self.fs_audio_driver:
-                fluidsynth.delete_fluid_audio_driver(self.fs_audio_driver)
-                self.fs_audio_driver = None
-            if self.fs_synth:
-                fluidsynth.delete_fluid_synth(self.fs_synth)
-                self.fs_synth = None
-            if self.fs_settings:
-                fluidsynth.delete_fluid_settings(self.fs_settings)
-                self.fs_settings = None
-        except Exception as e:
-            print(f"Error cleaning up FluidSynth: {e}")
-        
-        self.fluidsynth_ready = False
-        self.soundfont_loaded = False
 
     def create_widgets(self):
         # Configure default TTK styles (removed black styling)
@@ -516,12 +368,14 @@ class MidiGapperGUI(tk.Tk):
         self.bind_all('<MouseWheel>', lambda e: self.on_scroll_with_midi_sync('scroll', -scroll_factor * int(e.delta/120), 'units'))
         self.bind_all('<Up>', lambda e: self.on_scroll_with_midi_sync('scroll', -scroll_factor, 'units'))
         self.bind_all('<Down>', lambda e: self.on_scroll_with_midi_sync('scroll', scroll_factor, 'units'))
-        
-        # Add left/right arrow keys for time-based seeking
+          # Add left/right arrow keys for time-based seeking
         self.bind_all('<Left>', lambda e: self.seek_relative(-1.0))
         self.bind_all('<Right>', lambda e: self.seek_relative(1.0))
         self.bind_all('<Shift-Left>', lambda e: self.seek_relative(-5.0))
         self.bind_all('<Shift-Right>', lambda e: self.seek_relative(5.0))
+        
+        # Add space bar for play/pause toggle
+        self.bind_all('<space>', lambda e: self.toggle_play_pause())
         
         # Text screen tab
         text_frame = ttk.Frame(notebook)
@@ -1422,9 +1276,6 @@ class MidiGapperGUI(tk.Tk):
         # Stop any ongoing playback
         self.stop_midi()
         
-        # Clean up FluidSynth resources
-        self.cleanup_fluidsynth()
-        
         # Save window geometry and state
         self.config_data['geometry'] = self.geometry()
         self.config_data['window_state'] = self.state()  # Save window state (normal/zoomed)
@@ -2071,11 +1922,7 @@ class MidiGapperGUI(tk.Tk):
                     self.start_midi_playback()
                 else:
                     print(f"DEBUG: Position unchanged, resuming normally")
-                    if self.fluidsynth_ready and self.fs_player:
-                        # FluidSynth doesn't have pause/unpause, so restart from current position
-                        self.start_midi_playback()
-                    else:
-                        pygame.mixer.music.unpause()
+                    pygame.mixer.music.unpause()
                     
                     self.is_playing = True
                     self.is_paused = False
@@ -2120,86 +1967,20 @@ class MidiGapperGUI(tk.Tk):
         print(f"MIDI playback started at position {self.playback_position:.2f}s")
 
     def start_midi_playback(self):
-        """Start MIDI playback from current position using FluidSynth or pygame"""
+        """Start MIDI playback from current position using pygame"""
         try:
-            if self.fluidsynth_ready:
-                self._start_fluidsynth_playback()
-            else:
-                self._start_pygame_playback()
+            self._start_pygame_playback()
                 
         except Exception as e:
             print(f"Error starting MIDI playback: {e}")
             self.is_playing = False
             self.is_paused = False
 
-    def _start_fluidsynth_playback(self):
-        """Start MIDI playback using FluidSynth with seeking support"""
-        try:
-            print("Attempting FluidSynth playback...")
-            
-            # For now, use pygame fallback since FluidSynth player API is causing access violations
-            # TODO: Implement proper FluidSynth sequencer-based playback for true seeking
-            print("FluidSynth player API has issues, using pygame fallback")
-            self._start_pygame_playback()
-            return
-            
-            # The following FluidSynth code is disabled due to access violations
-            # This would need to be reimplemented using the sequencer API instead of player API
-            """
-            # Stop any current FluidSynth playback
-            if self.fs_player:
-                fluidsynth.delete_fluid_player(self.fs_player)
-                self.fs_player = None
-            
-            # Create new FluidSynth player
-            self.fs_player = fluidsynth.new_fluid_player(self.fs_synth)
-            if not self.fs_player:
-                raise Exception("Failed to create FluidSynth player")
-            
-            # Add the MIDI file to the player
-            # Convert to C-compatible string
-            import ctypes
-            midi_file_cstr = ctypes.c_char_p(self.current_midi_file.encode('utf-8'))
-            result = fluidsynth.fluid_player_add(self.fs_player, midi_file_cstr)
-            if result != 0:
-                raise Exception(f"Failed to load MIDI file into FluidSynth player: {result}")
-            
-            # If we need to seek to a specific position
-            if self.playback_position > 0.1:
-                # Convert seconds to MIDI ticks for seeking
-                seek_ticks = self._seconds_to_ticks(self.playback_position)
-                fluidsynth.fluid_player_seek(self.fs_player, seek_ticks)
-                self.visual_position_offset = self.playback_position
-                print(f"FluidSynth seeking to {self.playback_position:.2f}s (ticks: {seek_ticks})")
-            else:
-                self.visual_position_offset = 0.0
-                self.playback_position = 0.0
-            
-            # Start playback
-            fluidsynth.fluid_player_play(self.fs_player)
-            
-            # Record when audio playback actually started
-            self.playback_start_time = time.time()
-            
-            # Set playback state
-            self.is_playing = True
-            self.is_paused = False
-            
-            # Start the playback timer
-            self.update_playback_timer()
-            
-            print(f"Started FluidSynth MIDI playback from {self.playback_position:.2f}s")
-            """
-            
-        except Exception as e:
-            print(f"FluidSynth playback failed, falling back to pygame: {e}")
-            self._start_pygame_playback()
-
     def _start_pygame_playback(self):
         """Start MIDI playback using pygame with real audio seeking support"""
         try:
             print(f"DEBUG: _start_pygame_playback called with playback_position: {self.playback_position:.2f}s")
-              # Ensure pygame mixer is initialized (in case FluidSynth failed after startup)
+              # Ensure pygame mixer is initialized (in case it was not initialized properly)
             if not pygame.mixer.get_init():
                 print("Reinitializing pygame mixer...")
                 pygame.mixer.pre_init(frequency=22050, size=-16, channels=2, buffer=1024)
@@ -2460,11 +2241,7 @@ class MidiGapperGUI(tk.Tk):
         """Pause MIDI playback"""
         if self.is_playing:
             try:
-                if self.fluidsynth_ready and self.fs_player:
-                    # FluidSynth doesn't have a pause function, so we stop and record position
-                    fluidsynth.fluid_player_stop(self.fs_player)
-                else:
-                    pygame.mixer.music.pause()
+                pygame.mixer.music.pause()
                 
                 self.is_playing = False
                 self.is_paused = True
@@ -2487,10 +2264,7 @@ class MidiGapperGUI(tk.Tk):
     def stop_midi(self):
         """Stop MIDI playback and reset position"""
         try:
-            if self.fluidsynth_ready and self.fs_player:
-                fluidsynth.fluid_player_stop(self.fs_player)
-            else:
-                pygame.mixer.music.stop()
+            pygame.mixer.music.stop()
                 
             self.is_playing = False
             self.is_paused = False
@@ -2750,13 +2524,7 @@ class MidiGapperGUI(tk.Tk):
         try:
             # Stop any playing MIDI
             if self.is_playing:
-                if self.fluidsynth_ready and self.fs_player:
-                    fluidsynth.fluid_player_stop(self.fs_player)
-                else:
-                    pygame.mixer.music.stop()
-            
-            # Clean up FluidSynth resources
-            self.cleanup_fluidsynth()
+                pygame.mixer.music.stop()
             
             # Clean up temporary files
             self.cleanup_temp_files()
