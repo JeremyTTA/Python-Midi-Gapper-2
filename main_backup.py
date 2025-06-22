@@ -95,26 +95,40 @@ def save_config(config):
 class MidiGapperGUI(tk.Tk):
     # Map MIDI note number to note name
     NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
-    
+
     def __init__(self):
         super().__init__()
-        self.title('Python Midi Gapper 2')
+        self.title('Python Midi Gapper 2')        # Initialize MIDI playback - try FluidSynth first, fallback to pygame
+        self.midi_playback_available = False
+        self.use_fluidsynth = False
+        self.fs = None
+        self.audio_driver = None
+        self.fluidsynth_player = None
         
-        # Initialize MIDI playback systems
-        self.init_midi_playback()
-          # FluidSynth instance variables
-        self.fs_settings = None
-        self.fs_synth = None
-        self.fs_audio_driver = None
-        self.fs_player = None
-        self.soundfont_loaded = False
+        # Initialize FluidSynth for seeking support
+        if FLUIDSYNTH_AVAILABLE:
+            self.init_fluidsynth()
+        
+        # Fallback to pygame (no seeking support)
+        if not self.use_fluidsynth:
+            try:
+                pygame.mixer.pre_init(frequency=22050, size=-16, channels=2, buffer=1024)
+                pygame.mixer.init()
+                self.midi_playback_available = True
+                print("⚠ Using pygame mixer (no seeking support)")
+            except Exception as e:
+                print(f"Warning: Could not initialize pygame mixer: {e}")
+        else:
+            self.midi_playback_available = True
+        
+        if not self.midi_playback_available:
+            print("✗ No MIDI playback available")
           # MIDI playback state
         self.playback_thread = None
         self.playback_stop_event = threading.Event()
         self.current_playback_file = None
         self.playback_start_time = None  # When audio playback actually started
         self.visual_position_offset = 0.0  # Offset between visual and audio position
-        self.temp_midi_files = []  # Track temporary MIDI files for cleanup
         
         # Scrolling performance optimization for large MIDI files
         self.scroll_update_timer = None
@@ -180,131 +194,6 @@ class MidiGapperGUI(tk.Tk):
             self.state('zoomed')
             
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
-
-    def init_midi_playback(self):
-        """Initialize MIDI playback systems (FluidSynth and pygame fallback)"""
-        self.midi_playback_available = False
-        self.fluidsynth_ready = False
-        
-        # Always initialize pygame first as fallback
-        try:
-            pygame.mixer.pre_init(frequency=22050, size=-16, channels=2, buffer=1024)
-            pygame.mixer.init()
-            self.midi_playback_available = True
-            print("✓ Pygame mixer initialized for MIDI playback (fallback)")
-        except Exception as e:
-            print(f"⚠ Could not initialize pygame mixer: {e}")
-            self.midi_playback_available = False
-        
-        # Try to initialize FluidSynth for better seeking support
-        if FLUIDSYNTH_AVAILABLE:
-            try:
-                self.fs_settings = fluidsynth.new_fluid_settings()
-                if self.fs_settings:
-                    print("✓ FluidSynth settings created")
-                    
-                    # Create synthesizer
-                    self.fs_synth = fluidsynth.new_fluid_synth(self.fs_settings)
-                    if self.fs_synth:
-                        # Try to create audio driver
-                        try:
-                            self.fs_audio_driver = fluidsynth.new_fluid_audio_driver(self.fs_settings, self.fs_synth)
-                            
-                            # Try to load a default soundfont
-                            self.load_default_soundfont()
-                            
-                            if self.soundfont_loaded:
-                                self.fluidsynth_ready = True
-                                print("✓ FluidSynth ready for playback with seeking support")
-                            else:
-                                print("⚠ FluidSynth initialized but no soundfont loaded")
-                                print("  Download a soundfont (e.g., FluidR3_GM.sf2) for audio playback")
-                                
-                        except Exception as e:
-                            print(f"⚠ FluidSynth audio driver failed: {e}")
-                            self.cleanup_fluidsynth()
-                    else:
-                        print("⚠ Failed to create FluidSynth synthesizer")
-                        fluidsynth.delete_fluid_settings(self.fs_settings)
-                        self.fs_settings = None
-                else:
-                    print("⚠ Failed to create FluidSynth settings")
-                    
-            except Exception as e:
-                print(f"⚠ FluidSynth initialization error: {e}")
-                self.cleanup_fluidsynth()
-
-    def load_default_soundfont(self):
-        """Try to load a default soundfont for FluidSynth"""
-        # Common soundfont locations
-        potential_soundfonts = [
-            # Windows common locations
-            "C:\\soundfonts\\FluidR3_GM.sf2",
-            "C:\\Windows\\System32\\drivers\\gm.dls",
-            # Try in current directory
-            os.path.join(os.path.dirname(__file__), "soundfont.sf2"),
-            os.path.join(os.path.dirname(__file__), "FluidR3_GM.sf2"),
-            # Try user's Documents
-            os.path.expanduser("~/Documents/soundfonts/FluidR3_GM.sf2"),
-        ]
-        
-        for sf_path in potential_soundfonts:
-            if os.path.exists(sf_path):
-                try:
-                    # Convert path to C-compatible string
-                    import ctypes
-                    sf_path_cstr = ctypes.c_char_p(sf_path.encode('utf-8'))
-                    
-                    # Suppress libinstpatch warnings during DLS loading
-                    import sys
-                    import contextlib
-                    import io
-                    
-                    # Capture stderr to suppress libinstpatch warnings
-                    stderr_backup = sys.stderr
-                    sys.stderr = io.StringIO()
-                    
-                    try:
-                        sfid = fluidsynth.fluid_synth_sfload(self.fs_synth, sf_path_cstr, 1)
-                    finally:
-                        # Restore stderr
-                        sys.stderr = stderr_backup
-                    
-                    if sfid != -1:
-                        self.soundfont_loaded = True
-                        print(f"✓ Loaded soundfont: {sf_path}")
-                        return True
-                except Exception as e:
-                    print(f"⚠ Failed to load soundfont {sf_path}: {e}")
-                    continue
-        
-        # If no soundfont found, try to create a minimal one or download
-        print("⚠ No soundfont found. For FluidSynth audio:")
-        print("  1. Download FluidR3_GM.sf2 from: https://archive.org/details/fluidr-3-gm-gs-mt-32-sound-font")
-        print("  2. Place it in: C:\\soundfonts\\FluidR3_GM.sf2")
-        print("  3. Or place it in the same directory as this script")
-        return False
-
-    def cleanup_fluidsynth(self):
-        """Clean up FluidSynth resources"""
-        try:
-            if self.fs_player:
-                fluidsynth.delete_fluid_player(self.fs_player)
-                self.fs_player = None
-            if self.fs_audio_driver:
-                fluidsynth.delete_fluid_audio_driver(self.fs_audio_driver)
-                self.fs_audio_driver = None
-            if self.fs_synth:
-                fluidsynth.delete_fluid_synth(self.fs_synth)
-                self.fs_synth = None
-            if self.fs_settings:
-                fluidsynth.delete_fluid_settings(self.fs_settings)
-                self.fs_settings = None
-        except Exception as e:
-            print(f"Error cleaning up FluidSynth: {e}")
-        
-        self.fluidsynth_ready = False
-        self.soundfont_loaded = False
 
     def create_widgets(self):
         # Configure default TTK styles (removed black styling)
@@ -1416,15 +1305,6 @@ class MidiGapperGUI(tk.Tk):
                     return
 
     def on_closing(self):
-        # Clean up temporary MIDI files
-        self.cleanup_temp_files()
-        
-        # Stop any ongoing playback
-        self.stop_midi()
-        
-        # Clean up FluidSynth resources
-        self.cleanup_fluidsynth()
-        
         # Save window geometry and state
         self.config_data['geometry'] = self.geometry()
         self.config_data['window_state'] = self.state()  # Save window state (normal/zoomed)
@@ -2004,7 +1884,8 @@ class MidiGapperGUI(tk.Tk):
             
             print("Rewound to start")
             
-        except Exception as e:            print(f"Error rewinding to start: {e}")
+        except Exception as e:
+            print(f"Error rewinding to start: {e}")
 
     def toggle_play_pause(self):
         """Toggle between play and pause with button symbol changes"""
@@ -2017,66 +1898,45 @@ class MidiGapperGUI(tk.Tk):
                 print("MIDI playback not available")
                 return
             
-            # DEBUG: Print current playback position
-            print(f"DEBUG: Current playback_position before toggle: {self.playback_position:.2f}s")
-            
             if self.is_playing:
                 # Currently playing, so pause
                 self.pause_midi()
                 # Change button to play symbol
                 self.play_pause_button.config(text='▶', bg='lightgreen')
             elif self.is_paused:
-                # Currently paused, check if position changed before resuming
-                print(f"DEBUG: Checking if position changed during pause")
-                
-                # For simplicity, if position > 0.1s, always restart to ensure seeking works
-                if self.playback_position > 0.1:
-                    print(f"DEBUG: Position > 0.1s during resume, restarting playback")
-                    # Stop and restart from new position
-                    pygame.mixer.music.stop()
-                    self.is_playing = False
-                    self.is_paused = False
-                    self.play_midi()
-                else:
-                    print(f"DEBUG: Position <= 0.1s, normal resume")
-                    self.resume_midi()
+                # Currently paused, so resume from current scroll position
+                # Update playback position from scroll before resuming
+                self.update_playback_position_from_scroll()
+                self.resume_midi()
                 # Change button to pause symbol  
                 self.play_pause_button.config(text='⏸', bg='orange')
             else:
-                # Not playing, so start
-                print(f"DEBUG: Starting playback from position: {self.playback_position:.2f}s")
+                # Not playing, so start from current scroll position
+                # Update playback position from scroll before starting
+                self.update_playback_position_from_scroll()
                 self.play_midi()
                 # Change button to pause symbol
                 self.play_pause_button.config(text='⏸', bg='orange')
                 
-        except Exception as e:            print(f"Error toggling play/pause: {e}")
+        except Exception as e:
+            print(f"Error toggling play/pause: {e}")
 
     def resume_midi(self):
-        """Resume MIDI playback from pause"""
+        """Resume MIDI playback from current scroll position"""
         if self.is_paused:
             try:
-                # Check if the playback position has changed significantly since we paused
-                # If so, we need to restart playback from the new position instead of just resuming
-                current_audio_pos = self.get_actual_audio_position()
-                position_changed = abs(self.playback_position - current_audio_pos) > 1.0  # 1 second tolerance
-                
-                print(f"DEBUG: Resume requested - current audio pos: {current_audio_pos:.2f}s, playback pos: {self.playback_position:.2f}s")
+                # Check if user scrolled to a different position during pause
+                original_pause_position = getattr(self, 'pause_position', self.playback_position)
+                position_changed = abs(self.playback_position - original_pause_position) > 0.5  # 0.5 second tolerance
                 
                 if position_changed:
-                    print(f"DEBUG: Position changed significantly, restarting playback from {self.playback_position:.2f}s")
-                    # Stop current playback and restart from new position
-                    pygame.mixer.music.stop()
-                    self.is_playing = False
-                    self.is_paused = False
+                    # User scrolled during pause - restart from new position
+                    print(f"Position changed during pause ({original_pause_position:.2f}s → {self.playback_position:.2f}s), restarting playback")
+                    self.is_paused = False  # Clear pause state before restarting
                     self.start_midi_playback()
                 else:
-                    print(f"DEBUG: Position unchanged, resuming normally")
-                    if self.fluidsynth_ready and self.fs_player:
-                        # FluidSynth doesn't have pause/unpause, so restart from current position
-                        self.start_midi_playback()
-                    else:
-                        pygame.mixer.music.unpause()
-                    
+                    # Just unpause from the same position
+                    pygame.mixer.music.unpause()
                     self.is_playing = True
                     self.is_paused = False
                     # Reset start time to account for the pause
@@ -2084,8 +1944,7 @@ class MidiGapperGUI(tk.Tk):
                         elapsed_before_pause = self.playback_position - self.visual_position_offset
                         self.playback_start_time = time.time() - elapsed_before_pause
                     self.update_playback_timer()
-                    
-                print("MIDI playback resumed")
+                    print("MIDI playback resumed")
             except Exception as e:
                 print(f"Error resuming MIDI: {e}")
 
@@ -2119,330 +1978,258 @@ class MidiGapperGUI(tk.Tk):
         
         print(f"MIDI playback started at position {self.playback_position:.2f}s")
 
-    def start_midi_playback(self):
-        """Start MIDI playback from current position using FluidSynth or pygame"""
-        try:
-            if self.fluidsynth_ready:
-                self._start_fluidsynth_playback()
-            else:
-                self._start_pygame_playback()
-                
-        except Exception as e:
-            print(f"Error starting MIDI playback: {e}")
-            self.is_playing = False
-            self.is_paused = False
-
-    def _start_fluidsynth_playback(self):
-        """Start MIDI playback using FluidSynth with seeking support"""
-        try:
-            print("Attempting FluidSynth playback...")
-            
-            # For now, use pygame fallback since FluidSynth player API is causing access violations
-            # TODO: Implement proper FluidSynth sequencer-based playback for true seeking
-            print("FluidSynth player API has issues, using pygame fallback")
-            self._start_pygame_playback()
-            return
-            
-            # The following FluidSynth code is disabled due to access violations
-            # This would need to be reimplemented using the sequencer API instead of player API
-            """
-            # Stop any current FluidSynth playback
-            if self.fs_player:
-                fluidsynth.delete_fluid_player(self.fs_player)
-                self.fs_player = None
-            
-            # Create new FluidSynth player
-            self.fs_player = fluidsynth.new_fluid_player(self.fs_synth)
-            if not self.fs_player:
-                raise Exception("Failed to create FluidSynth player")
-            
-            # Add the MIDI file to the player
-            # Convert to C-compatible string
-            import ctypes
-            midi_file_cstr = ctypes.c_char_p(self.current_midi_file.encode('utf-8'))
-            result = fluidsynth.fluid_player_add(self.fs_player, midi_file_cstr)
-            if result != 0:
-                raise Exception(f"Failed to load MIDI file into FluidSynth player: {result}")
-            
-            # If we need to seek to a specific position
-            if self.playback_position > 0.1:
-                # Convert seconds to MIDI ticks for seeking
-                seek_ticks = self._seconds_to_ticks(self.playback_position)
-                fluidsynth.fluid_player_seek(self.fs_player, seek_ticks)
-                self.visual_position_offset = self.playback_position
-                print(f"FluidSynth seeking to {self.playback_position:.2f}s (ticks: {seek_ticks})")
-            else:
-                self.visual_position_offset = 0.0
-                self.playback_position = 0.0
-            
-            # Start playback
-            fluidsynth.fluid_player_play(self.fs_player)
-            
-            # Record when audio playback actually started
-            self.playback_start_time = time.time()
-            
-            # Set playback state
-            self.is_playing = True
-            self.is_paused = False
-            
-            # Start the playback timer
-            self.update_playback_timer()
-            
-            print(f"Started FluidSynth MIDI playback from {self.playback_position:.2f}s")
-            """
-            
-        except Exception as e:
-            print(f"FluidSynth playback failed, falling back to pygame: {e}")
-            self._start_pygame_playback()
-
-    def _start_pygame_playback(self):
-        """Start MIDI playback using pygame with real audio seeking support"""
-        try:
-            print(f"DEBUG: _start_pygame_playback called with playback_position: {self.playback_position:.2f}s")
-              # Ensure pygame mixer is initialized (in case FluidSynth failed after startup)
-            if not pygame.mixer.get_init():
-                print("Reinitializing pygame mixer...")
-                pygame.mixer.pre_init(frequency=22050, size=-16, channels=2, buffer=1024)
-                pygame.mixer.init()
-            
-            # For seeking: create a temporary MIDI file starting from the seek position
-            if self.playback_position > 0.1:  # If we're seeking to a specific position
-                print(f"DEBUG: Position > 0.1s, creating temporary MIDI file starting from {self.playback_position:.2f}s...")
-                midi_file_to_play = self.create_temp_midi_from_position(self.playback_position)
-                
-                # Check if temp file creation was successful
-                if midi_file_to_play and midi_file_to_play != self.current_midi_file and os.path.exists(midi_file_to_play):
-                    self.visual_position_offset = self.playback_position  # Track where we started
-                    print(f"DEBUG: ✓ Temp file created successfully: {midi_file_to_play}")
-                    print(f"DEBUG: ✓ Audio seeking to {self.playback_position:.2f}s (real audio seek)")
-                else:
-                    # Fallback to original file if temp file creation failed
-                    print(f"DEBUG: ✗ Temp file creation failed, falling back to original file (audio will start from beginning)")
-                    midi_file_to_play = self.current_midi_file
-                    self.visual_position_offset = self.playback_position  # Keep visual offset for sync
-            else:
-                # Starting from beginning - use original file
-                print(f"DEBUG: Position <= 0.1s, using original file")
-                midi_file_to_play = self.current_midi_file
-                self.visual_position_offset = 0.0
-                self.playback_position = 0.0
-            
-            print(f"DEBUG: Loading and playing MIDI file: {midi_file_to_play}")
-            
-            # Load and play the MIDI file
-            pygame.mixer.music.load(midi_file_to_play)
-            pygame.mixer.music.play()
-            
-            # Record when audio playback actually started
-            self.playback_start_time = time.time()
-            
-            # Set playback state
-            self.is_playing = True
-            self.is_paused = False
-            
-            # Start the playback timer
-            self.update_playback_timer()
-            
-            print(f"DEBUG: ✓ Started pygame MIDI playback from {self.playback_position:.2f}s")
-            
-        except Exception as e:
-            print(f"Error starting pygame MIDI playback: {e}")
-            # If pygame fails, try to reinitialize it once more
-            try:
-                print("Attempting to reinitialize pygame mixer...")
-                pygame.mixer.quit()
-                pygame.mixer.pre_init(frequency=22050, size=-16, channels=2, buffer=1024)
-                pygame.mixer.init()
-                  # Try playback again with original file if temp file failed
-                midi_file_to_play = self.current_midi_file
-                pygame.mixer.music.load(midi_file_to_play)
-                pygame.mixer.music.play()
-                
-                self.playback_start_time = time.time()
-                self.is_playing = True
-                self.is_paused = False
-                self.update_playback_timer()
-                
-                print("Pygame mixer reinitialized and playback started")
-                
-            except Exception as e2:
-                print(f"Failed to reinitialize pygame mixer: {e2}")
-                raise
-
-    def _seconds_to_ticks(self, seconds):
-        """Convert seconds to MIDI ticks for seeking with proper tempo handling"""
-        try:
-            # Load the MIDI file to get timing information
-            midi_file = mido.MidiFile(self.current_midi_file)
-            ticks_per_beat = midi_file.ticks_per_beat
-            
-            # Build a timeline of tempo changes
-            tempo_changes = []
-            current_tempo = 500000  # Default tempo (120 BPM in microseconds per beat)
-            
-            for track in midi_file.tracks:
-                current_time = 0
-                for msg in track:
-                    current_time += msg.time
-                    if msg.type == 'set_tempo':
-                        # Convert ticks to seconds at current tempo, then store new tempo
-                        time_seconds = mido.tick2second(current_time, ticks_per_beat, current_tempo)
-                        tempo_changes.append((time_seconds, msg.tempo))
-                        current_tempo = msg.tempo
-            
-            # Sort tempo changes by time
-            tempo_changes.sort()
-            
-            # If no tempo changes found, use default
-            if not tempo_changes:
-                tempo_changes = [(0.0, current_tempo)]
-            
-            # Convert seconds to ticks using tempo timeline
-            target_seconds = seconds
-            accumulated_ticks = 0
-            prev_time = 0.0
-            current_tempo = tempo_changes[0][1]
-            
-            for change_time, new_tempo in tempo_changes:
-                if target_seconds <= change_time:
-                    # Target time is before this tempo change
-                    break
-                
-                # Add ticks for the time interval at current tempo
-                interval_seconds = change_time - prev_time
-                interval_ticks = mido.second2tick(interval_seconds, ticks_per_beat, current_tempo)
-                accumulated_ticks += interval_ticks
-                
-                prev_time = change_time
-                current_tempo = new_tempo
-            
-            # Add remaining time at final tempo
-            remaining_seconds = target_seconds - prev_time
-            if remaining_seconds > 0:
-                remaining_ticks = mido.second2tick(remaining_seconds, ticks_per_beat, current_tempo)
-                accumulated_ticks += remaining_ticks
-            
-            print(f"DEBUG: Converted {seconds:.2f}s to {int(accumulated_ticks)} ticks using tempo timeline")
-            return int(accumulated_ticks)
-            
-        except Exception as e:
-            print(f"Error converting seconds to ticks: {e}")
-            # Fallback calculation
-            return int(seconds * 480)  # 480 is a common ticks_per_beat value
-    
     def create_temp_midi_from_position(self, start_time_seconds):
         """Create a temporary MIDI file starting from the specified time position"""
         try:
-            print(f"DEBUG: Creating temp MIDI file from {start_time_seconds:.2f}s")
             import tempfile
-            import copy
+            import os
             
-            if not hasattr(self, 'temp_midi_files'):
-                self.temp_midi_files = []
+            print(f"=== TEMP MIDI FILE CREATION ===")
+            print(f"Target start time: {start_time_seconds:.2f}s")
+            print(f"Original file: {os.path.basename(self.current_midi_file)}")
             
-            # Create temporary file
-            temp_fd, temp_path = tempfile.mkstemp(suffix='.mid', prefix='midi_seek_')
-            os.close(temp_fd)  # Close the file descriptor, we'll write with mido
-            
-            # Keep track of temp files for cleanup
-            self.temp_midi_files.append(temp_path)
-            
-            print(f"DEBUG: Creating temporary MIDI file: {temp_path}")
-            
-            # Load the original MIDI file
-            original_midi = mido.MidiFile(self.current_midi_file)
-            print(f"DEBUG: Loaded original MIDI: {len(original_midi.tracks)} tracks, ticks_per_beat: {original_midi.ticks_per_beat}")
-            
-            # Create new MIDI file with same properties
-            new_midi = mido.MidiFile(
-                type=original_midi.type,
-                ticks_per_beat=original_midi.ticks_per_beat
-            )
-              # Convert start time to ticks
-            start_ticks = self._seconds_to_ticks(start_time_seconds)
-            print(f"DEBUG: Start time {start_time_seconds:.2f}s = {start_ticks} ticks")
-            
-            # Find the tempo that should be active at the start position
-            active_tempo = 500000  # Default tempo (120 BPM)
-            for track in original_midi.tracks:
-                current_time = 0
-                for msg in track:
-                    current_time += msg.time
-                    if msg.type == 'set_tempo' and current_time <= start_ticks:
-                        active_tempo = msg.tempo
-                    elif current_time > start_ticks:
+            # Try to use mido to create a proper MIDI file that starts from the specified position
+            try:
+                import mido
+                print(f"✓ mido library available")
+                
+                # Load the original MIDI file
+                print(f"Loading original MIDI file...")
+                mid = mido.MidiFile(self.current_midi_file)
+                print(f"✓ Original file loaded: {len(mid.tracks)} tracks, {mid.ticks_per_beat} ticks/beat")
+                
+                # First pass: scan to target position to determine tempo and state
+                initial_tempo = getattr(self, 'tempo_us', 500000)
+                target_tempo = initial_tempo
+                tempo_changes_before_target = []
+                
+                print(f"Scanning to position {start_time_seconds:.2f}s to determine tempo context...")
+                print(f"Initial tempo: {initial_tempo} µs/beat ({60e6/initial_tempo:.1f} BPM)")
+                
+                # Scan the first track (typically contains tempo changes)
+                current_time = 0.0
+                current_tempo = initial_tempo
+                scan_message_count = 0
+                
+                for msg in mid.tracks[0]:
+                    scan_message_count += 1
+                    if msg.time > 0:
+                        delta_time = mido.tick2second(msg.time, mid.ticks_per_beat, current_tempo)
+                        current_time += delta_time
+                    
+                    if msg.type == 'set_tempo':
+                        if current_time <= start_time_seconds:
+                            # This tempo change occurs before our target - we need it
+                            old_tempo = current_tempo
+                            current_tempo = msg.tempo
+                            target_tempo = msg.tempo
+                            tempo_changes_before_target.append({
+                                'time': current_time,
+                                'tempo': msg.tempo
+                            })
+                            print(f"✓ Found tempo change at {current_time:.2f}s: {60e6/old_tempo:.1f} → {60e6/msg.tempo:.1f} BPM")
+                        else:
+                            print(f"✓ Scan complete: reached {current_time:.2f}s (past target)")
+                            break  # We've passed the target position
+                    
+                    # Safety check to avoid infinite loops
+                    if scan_message_count > 10000:
+                        print(f"⚠ Scan limit reached after {scan_message_count} messages")
                         break
-            
-            print(f"DEBUG: Active tempo at start position: {active_tempo} μs/beat ({mido.tempo2bpm(active_tempo):.1f} BPM)")
-            
-            # Process each track
-            tracks_processed = 0
-            for track_idx, original_track in enumerate(original_midi.tracks):
-                new_track = mido.MidiTrack()
-                new_track.name = original_track.name
                 
-                # For the first track (usually contains tempo), add the active tempo at the start
-                if track_idx == 0:
-                    # Add tempo event at the beginning of the temp file
-                    tempo_msg = mido.MetaMessage('set_tempo', tempo=active_tempo, time=0)
-                    new_track.append(tempo_msg)
-                    print(f"DEBUG: Added tempo event to temp file: {mido.tempo2bpm(active_tempo):.1f} BPM")
+                print(f"✓ Scan complete: processed {scan_message_count} messages")
+                print(f"✓ Tempo at target position: {target_tempo} µs/beat ({60e6/target_tempo:.1f} BPM)")
+                print(f"✓ Found {len(tempo_changes_before_target)} tempo changes before target")
                 
-                # Convert track messages to absolute time, filter, then back to delta time
-                absolute_messages = []
-                current_time = 0
+                # Create a new MIDI file with the same properties
+                new_mid = mido.MidiFile(ticks_per_beat=mid.ticks_per_beat, type=mid.type)
+                print(f"✓ Created new MIDI file structure")
                 
-                # Convert to absolute time and filter messages
-                for msg in original_track:
-                    current_time += msg.time
-                    if current_time >= start_ticks:
-                        # Calculate the adjusted time (relative to start position)
-                        adjusted_time = current_time - start_ticks
+                # Process each track
+                total_original_messages = 0
+                total_new_messages = 0
+                
+                for track_idx, track in enumerate(mid.tracks):
+                    print(f"Processing track {track_idx}...")
+                    new_track = mido.MidiTrack()
+                    current_time = 0.0
+                    current_tempo = initial_tempo
+                    messages_added = 0
+                    messages_processed = 0
+                    first_message_added = False
+                    
+                    # If this is track 0 and we need to set initial tempo, add it first
+                    if track_idx == 0 and target_tempo != initial_tempo:
+                        tempo_msg = mido.MetaMessage('set_tempo', tempo=target_tempo, time=0)
+                        new_track.append(tempo_msg)
+                        print(f"  ✓ Added initial tempo: {60e6/target_tempo:.1f} BPM")
+                        messages_added += 1
+                      # Convert messages and track timing
+                    previous_temp_time = 0.0  # Track timing in the temp file
+                    
+                    for msg in track:
+                        messages_processed += 1
+                        total_original_messages += 1
                         
-                        # Skip tempo events that are duplicates of our initial tempo
-                        if msg.type == 'set_tempo' and adjusted_time == 0 and msg.tempo == active_tempo:
-                            continue
+                        # Update timing using current tempo
+                        if msg.time > 0:
+                            delta_time = mido.tick2second(msg.time, mid.ticks_per_beat, current_tempo)
+                            current_time += delta_time
                         
-                        absolute_messages.append((adjusted_time, msg.copy()))
+                        # Update tempo if this is a tempo change message
+                        if msg.type == 'set_tempo':
+                            current_tempo = msg.tempo
+                        
+                        # If we've reached or passed the start time, add this message
+                        if current_time >= start_time_seconds:
+                            if not first_message_added:
+                                # For the very first message, set time to 0 to start immediately
+                                adjusted_msg = msg.copy(time=0)
+                                first_message_added = True
+                                previous_temp_time = current_time
+                                print(f"  ✓ First message ({msg.type}) at {current_time:.3f}s, adjusted to time=0")
+                            else:
+                                # Calculate the proper delta time for the temp file
+                                # This is the time since the last message we added to the temp file
+                                temp_delta_seconds = current_time - previous_temp_time
+                                temp_delta_ticks = mido.second2tick(temp_delta_seconds, mid.ticks_per_beat, current_tempo)
+                                
+                                # Ensure we have a reasonable tick value (not negative or too large)
+                                temp_delta_ticks = max(0, min(temp_delta_ticks, 1000))  # Cap at reasonable values
+                                
+                                adjusted_msg = msg.copy(time=int(temp_delta_ticks))
+                                previous_temp_time = current_time
+                            
+                            new_track.append(adjusted_msg)
+                            messages_added += 1
+                            total_new_messages += 1
+                        
+                        # Safety check for very large files
+                        if messages_processed > 50000:
+                            print(f"  ⚠ Track {track_idx} processing limit reached")
+                            break
+                      # Add the track (even if empty to maintain structure)
+                    # If we added messages to this track, ensure it has an end_of_track message
+                    if messages_added > 0:
+                        # Check if the last message is already end_of_track
+                        if not new_track or new_track[-1].type != 'end_of_track':
+                            end_msg = mido.MetaMessage('end_of_track', time=0)
+                            new_track.append(end_msg)
+                            messages_added += 1
+                            print(f"  ✓ Added end_of_track message")
+                    
+                    new_mid.tracks.append(new_track)
+                    print(f"  ✓ Track {track_idx}: {messages_processed} processed → {messages_added} added")
                 
-                # Convert back to delta time
-                prev_time = 0
-                if track_idx == 0:
-                    # Account for the tempo message we added at the beginning
-                    prev_time = 0
+                print(f"✓ Processing complete:")
+                print(f"  Original messages: {total_original_messages}")
+                print(f"  New messages: {total_new_messages}")
+                print(f"  Reduction: {((total_original_messages - total_new_messages) / total_original_messages * 100):.1f}%")
                 
-                for abs_time, msg in absolute_messages:
-                    delta_time = abs_time - prev_time
-                    new_msg = msg.copy()
-                    new_msg.time = delta_time
-                    new_track.append(new_msg)
-                    prev_time = abs_time
+                # Create temporary file
+                if not hasattr(self, 'temp_midi_files'):
+                    self.temp_midi_files = []
                 
-                # Ensure track has an end_of_track message
-                if new_track and new_track[-1].type != 'end_of_track':
-                    new_track.append(mido.MetaMessage('end_of_track', time=0))
-                elif not new_track:
-                    # Empty track, add end_of_track
-                    new_track.append(mido.MetaMessage('end_of_track', time=0))
+                temp_fd, temp_path = tempfile.mkstemp(suffix='.mid', prefix='midi_seek_')
+                os.close(temp_fd)  # Close the file descriptor, we just need the path
                 
-                new_midi.tracks.append(new_track)
-                tracks_processed += 1
-                print(f"DEBUG: Processed track {track_idx}: {len(original_track)} -> {len(new_track)} messages")
+                # Save the new MIDI file
+                print(f"Saving temporary file...")
+                new_mid.save(temp_path)
+                self.temp_midi_files.append(temp_path)
+                  # Verify the file was created and has content
+                if os.path.exists(temp_path):
+                    file_size = os.path.getsize(temp_path)
+                    print(f"✓ SUCCESS: Temporary file created")
+                    print(f"  Path: {temp_path}")
+                    print(f"  Size: {file_size} bytes")
+                    print(f"  Tracks: {len(new_mid.tracks)}")
+                    print(f"  Tempo: {60e6/target_tempo:.1f} BPM")
+                    
+                    # ENHANCED DEBUG: Analyze the temp file content
+                    print(f"=== TEMP FILE CONTENT ANALYSIS ===")
+                    try:
+                        # Reload the temp file to verify it's valid
+                        verify_mid = mido.MidiFile(temp_path)
+                        print(f"✓ Temp file can be reloaded")
+                        print(f"  Duration: {verify_mid.length:.3f} seconds")
+                        
+                        # Count different message types
+                        note_on_count = 0
+                        note_off_count = 0
+                        tempo_count = 0
+                        program_count = 0
+                        other_count = 0
+                        
+                        for track_idx, track in enumerate(verify_mid.tracks):
+                            track_note_on = 0
+                            track_note_off = 0
+                            for msg in track:
+                                if msg.type == 'note_on':
+                                    if msg.velocity > 0:
+                                        note_on_count += 1
+                                        track_note_on += 1
+                                    else:
+                                        note_off_count += 1
+                                        track_note_off += 1
+                                elif msg.type == 'note_off':
+                                    note_off_count += 1
+                                    track_note_off += 1
+                                elif msg.type == 'set_tempo':
+                                    tempo_count += 1
+                                elif msg.type == 'program_change':
+                                    program_count += 1
+                                else:
+                                    other_count += 1
+                            
+                            if track_note_on > 0 or track_note_off > 0:
+                                print(f"  Track {track_idx}: {track_note_on} note_on, {track_note_off} note_off")
+                        
+                        print(f"  TOTAL: {note_on_count} note_on, {note_off_count} note_off, {tempo_count} tempo, {program_count} program, {other_count} other")
+                        
+                        # Critical issue detection
+                        if note_on_count == 0:
+                            print(f"⚠ CRITICAL: No note_on events in temp file!")
+                        
+                        if verify_mid.length < 0.1:
+                            print(f"⚠ CRITICAL: Temp file duration too short ({verify_mid.length:.3f}s)")
+                        
+                        # Test pygame compatibility
+                        print(f"=== PYGAME COMPATIBILITY TEST ===")
+                        try:
+                            pygame.mixer.music.load(temp_path)
+                            print(f"✓ pygame can load temp file")
+                        except Exception as pygame_error:
+                            print(f"✗ pygame cannot load temp file: {pygame_error}")
+                            
+                    except Exception as analysis_error:
+                        print(f"✗ Temp file analysis failed: {analysis_error}")
+                    
+                    print(f"=== END TEMP FILE CREATION ===")
+                    return temp_path
+                else:
+                    print(f"✗ ERROR: File was not created")
+                    return None
+                
+            except ImportError:
+                print("✗ mido library not available - falling back to visual sync only")
+            except Exception as e:
+                print(f"✗ Error creating MIDI file with mido: {e}")
+                import traceback
+                traceback.print_exc()
             
-            # Save the temporary MIDI file
-            new_midi.save(temp_path)
-            file_size = os.path.getsize(temp_path)
-            print(f"DEBUG: ✓ Saved temporary MIDI file starting from {start_time_seconds:.2f}s")
-            print(f"DEBUG: ✓ Temp file size: {file_size} bytes, processed {tracks_processed} tracks")
-            
-            return temp_path
+            # Fallback: use original approach with visual sync only
+            print(f"FALLBACK: Using original file with visual sync")
+            print(f"  Note: Audio will start from beginning")
+            print(f"  Visual will try to sync to {start_time_seconds:.2f}s")
+            print(f"=== END TEMP FILE CREATION (FALLBACK) ===")
+            return self.current_midi_file
             
         except Exception as e:
-            print(f"DEBUG: ✗ Error creating temporary MIDI file: {e}")
+            print(f"✗ CRITICAL ERROR in temp file creation: {e}")
             import traceback
             traceback.print_exc()
-            # Return original file as fallback
-            print(f"DEBUG: ✗ Returning original file as fallback")
+            print(f"=== END TEMP FILE CREATION (ERROR) ===")
             return self.current_midi_file
 
     def cleanup_temp_files(self):
@@ -2460,12 +2247,7 @@ class MidiGapperGUI(tk.Tk):
         """Pause MIDI playback"""
         if self.is_playing:
             try:
-                if self.fluidsynth_ready and self.fs_player:
-                    # FluidSynth doesn't have a pause function, so we stop and record position
-                    fluidsynth.fluid_player_stop(self.fs_player)
-                else:
-                    pygame.mixer.music.pause()
-                
+                pygame.mixer.music.pause()
                 self.is_playing = False
                 self.is_paused = True
                 if self.playback_timer:
@@ -2477,21 +2259,27 @@ class MidiGapperGUI(tk.Tk):
                     elapsed = time.time() - self.playback_start_time
                     self.playback_position = self.visual_position_offset + elapsed
                 
+                # Store the position where we paused for comparison later
+                self.pause_position = self.playback_position
+                
                 # Update button to show play symbol when paused
                 self.play_pause_button.config(text='▶', bg='lightgreen')
                 
-                print("MIDI playback paused")
+                print(f"MIDI playback paused at {self.playback_position:.2f}s")
             except Exception as e:
-                print(f"Error pausing MIDI: {e}")
-
-    def stop_midi(self):
+                print(f"Error pausing MIDI: {e}")    def stop_midi(self):
         """Stop MIDI playback and reset position"""
         try:
-            if self.fluidsynth_ready and self.fs_player:
-                fluidsynth.fluid_player_stop(self.fs_player)
+            if hasattr(self, 'use_fluidsynth') and self.use_fluidsynth and hasattr(self, 'fluidsynth_player'):
+                # Stop FluidSynth playback
+                if hasattr(self, 'fluidsynth_player') and self.fluidsynth_player:
+                    fluidsynth.fluid_player_stop(self.fluidsynth_player)
+                    fluidsynth.delete_fluid_player(self.fluidsynth_player)
+                    self.fluidsynth_player = None
             else:
+                # Stop pygame playback
                 pygame.mixer.music.stop()
-                
+            
             self.is_playing = False
             self.is_paused = False
             self.playback_position = 0.0
@@ -2502,21 +2290,24 @@ class MidiGapperGUI(tk.Tk):
                 self.playback_timer = None
             
             # Stop playback thread if running
-            if self.playback_thread and self.playback_thread.is_alive():
-                self.playback_stop_event.set()
+            if hasattr(self, 'playback_thread') and self.playback_thread and self.playback_thread.is_alive():
+                if hasattr(self, 'playback_stop_event'):
+                    self.playback_stop_event.set()
                 self.playback_thread.join(timeout=1.0)
             
             # Clean up any temporary MIDI files
             self.cleanup_temp_files()
             
             # Reset button to play symbol when stopped
-            self.play_pause_button.config(text='▶', bg='lightgreen')
+            if hasattr(self, 'play_pause_button'):
+                self.play_pause_button.config(text='▶', bg='lightgreen')
             
             self.update_led_clock()
             self.sync_scrollbar_to_midi_position()
             self.update_keyboard_highlighting()  # Clear any highlighted keys
             print("MIDI playback stopped")
         except Exception as e:
+            print(f"Error stopping MIDI: {e}")
             print(f"Error stopping MIDI: {e}")
 
     def update_playback_timer(self):
@@ -2648,9 +2439,9 @@ class MidiGapperGUI(tk.Tk):
             # When scroll_bottom = 1.0 (at bottom), we want time = 0
             # When scroll_top = 0.0 (at top), we want time = max_time
             time_position = (1.0 - scroll_bottom) * self.max_time
-              # Update MIDI playback position
+            
+            # Update MIDI playback position
             self.playback_position = max(0.0, min(time_position, self.max_time))
-            print(f"DEBUG: Scroll position updated to {self.playback_position:.2f}s (from scroll_bottom: {scroll_bottom:.3f})")
               # Update LED clock immediately (lightweight)
             self.update_led_clock()
             
@@ -2738,25 +2529,330 @@ class MidiGapperGUI(tk.Tk):
             
         # Update scrollbar to match new position
         self.sync_scrollbar_to_midi_position()
-        
-        # Update LED clock
-        self.update_led_clock()
-        
-        # Update keyboard highlighting
+          # Update LED clock
+        self.update_led_clock()        # Update keyboard highlighting
         self.update_keyboard_highlighting()
+
+    def update_playback_position_from_scroll(self):
+        """Update the playback position based on current scroll position"""
+        if hasattr(self, 'max_time') and self.max_time > 0:
+            # Get current scroll position (0.0 to 1.0)
+            scroll_top, scroll_bottom = self.canvas.yview()
+            
+            # Calculate the time position based on the bottom of the visible area
+            # When scroll_bottom = 1.0 (at bottom), we want time = 0
+            # When scroll_top = 0.0 (at top), we want time = max_time
+            time_position = (1.0 - scroll_bottom) * self.max_time
+            
+            # Update MIDI playback position
+            old_position = self.playback_position
+            self.playback_position = max(0.0, min(time_position, self.max_time))
+            
+            # Update LED clock to reflect new position
+            self.update_led_clock()
+            
+            print(f"=== SCROLL POSITION UPDATE ===")
+            print(f"Max time: {self.max_time:.2f}s")
+            print(f"Scroll info: top={scroll_top:.3f}, bottom={scroll_bottom:.3f}")
+            print(f"Viewport height: {(scroll_bottom - scroll_top):.3f}")
+            print(f"Time calculation: (1.0 - {scroll_bottom:.3f}) * {self.max_time:.2f} = {time_position:.2f}s")
+            print(f"Position change: {old_position:.2f}s → {self.playback_position:.2f}s")
+            print(f"Position as percentage: {(self.playback_position / self.max_time * 100):.1f}%")
+            print(f"=== END SCROLL UPDATE ===")
+        else:
+            print("⚠ Cannot update position: max_time not available")
+
+    def start_midi_playback(self):
+        """Start MIDI playback from current position using FluidSynth or pygame fallback"""
+        try:
+            import os
+            
+            print(f"=== STARTING MIDI PLAYBACK ===")
+            print(f"Current scroll position: {self.playback_position:.2f}s")
+            print(f"Max time: {getattr(self, 'max_time', 'Unknown'):.2f}s")
+            
+            # Force update position from scroll to ensure we have the latest
+            self.update_playback_position_from_scroll()
+            print(f"Position after scroll update: {self.playback_position:.2f}s")
+            
+            # Try FluidSynth first for proper seeking support
+            if FLUIDSYNTH_AVAILABLE and hasattr(self, 'use_fluidsynth') and self.use_fluidsynth:
+                print("✓ Using FluidSynth for playback with seeking support")
+                self.start_fluidsynth_playback()
+            else:
+                print("⚠ Using pygame fallback (no seeking)")
+                self.start_pygame_playback()
+                
+        except Exception as e:
+            print(f"Error starting MIDI playback: {e}")
+            self.is_playing = False
+            self.is_paused = False
+
+    def start_fluidsynth_playback(self):
+        """Start MIDI playback using FluidSynth with seeking support"""
+        try:
+            import os
+            
+            if not hasattr(self, 'fs') or self.fs is None:
+                self.init_fluidsynth()
+            
+            if self.fs is None:
+                print("✗ FluidSynth initialization failed, falling back to pygame")
+                self.start_pygame_playback()
+                return
+            
+            print(f"✓ Starting FluidSynth playback from {self.playback_position:.2f}s")
+            
+            # Load the MIDI file into FluidSynth
+            player_id = fluidsynth.new_fluid_player(self.fs)
+            if player_id == fluidsynth.FLUID_FAILED:
+                print("✗ Failed to create FluidSynth player")
+                self.start_pygame_playback()
+                return
+            
+            # Add the MIDI file to the player
+            if fluidsynth.fluid_player_add(player_id, self.current_midi_file.encode()) == fluidsynth.FLUID_FAILED:
+                print("✗ Failed to add MIDI file to FluidSynth player")
+                fluidsynth.delete_fluid_player(player_id)
+                self.start_pygame_playback()
+                return
+            
+            # Seek to the desired position (FluidSynth uses ticks, not seconds)
+            if self.playback_position > 0.1:
+                # Calculate approximate tick position
+                # This is a rough calculation - FluidSynth seeking is tick-based
+                midi_file = mido.MidiFile(self.current_midi_file)
+                total_ticks = sum(msg.time for track in midi_file.tracks for msg in track)
+                target_tick = int((self.playback_position / midi_file.length) * total_ticks)
+                
+                print(f"✓ Seeking to approximately tick {target_tick} (position {self.playback_position:.2f}s)")
+                fluidsynth.fluid_player_seek(player_id, target_tick)
+            
+            # Start playback
+            fluidsynth.fluid_player_play(player_id)
+            
+            # Store player reference for control
+            self.fluidsynth_player = player_id
+            self.playback_start_time = time.time()
+            self.visual_position_offset = 0.0  # No offset needed with real seeking
+            
+            # Set playback state
+            self.is_playing = True
+            self.is_paused = False
+            
+            # Start the playback timer
+            self.update_playback_timer()
+            
+            print(f"✓ FluidSynth playback started successfully")
+            
+        except Exception as e:
+            print(f"Error in FluidSynth playback: {e}")
+            self.start_pygame_playback()
+
+    def start_pygame_playback(self):
+        """Fallback pygame playback (original method with temp files)"""
+        try:
+            import os
+            midi_file_to_play = self.current_midi_file
+            
+            # Store the visual position offset for timing correction
+            # Only set offset if we're actually starting from a non-zero position
+            if self.playback_position > 0.1:  # Allow small tolerance for "beginning"
+                print(f"SEEKING: Position {self.playback_position:.2f}s > 0.1s threshold")
+                self.visual_position_offset = self.playback_position
+                
+                print(f"Attempting to create temporary MIDI file for position {self.playback_position:.2f}s...")
+                
+                # Create a temporary MIDI file starting from the specified position
+                temp_file = self.create_temp_midi_from_position(self.playback_position)
+                
+                if temp_file and temp_file != self.current_midi_file:
+                    # Successfully created temp file
+                    midi_file_to_play = temp_file
+                    print(f"✓ SUCCESS: Using temp file: {os.path.basename(midi_file_to_play)}")
+                    print(f"✓ Visual offset set to: {self.visual_position_offset:.2f}s")
+                else:
+                    # Fallback to original file with visual sync
+                    midi_file_to_play = self.current_midi_file
+                    print(f"⚠ WARNING: Temp file creation failed, using original file")
+            else:
+                # Starting from beginning - no offset needed
+                print(f"NORMAL START: Position {self.playback_position:.2f}s <= 0.1s threshold")
+                self.visual_position_offset = 0.0
+                self.playback_position = 0.0  # Ensure we start from exactly 0
+                print("✓ Starting from beginning (no seeking needed)")
+            
+            # Verify the file exists before loading
+            if not os.path.exists(midi_file_to_play):
+                raise FileNotFoundError(f"MIDI file not found: {midi_file_to_play}")
+            
+            # Load and play the MIDI file
+            print(f"Loading MIDI file: {os.path.basename(midi_file_to_play)}")
+            pygame.mixer.music.load(midi_file_to_play)
+            print(f"Starting pygame playback...")
+            pygame.mixer.music.play()
+            
+            # Record when audio playback actually started
+            self.playback_start_time = time.time()
+            print(f"Audio started at system time: {self.playback_start_time}")
+            
+            # Set playback state
+            self.is_playing = True
+            self.is_paused = False
+              # Start the playback timer
+            self.update_playback_timer()
+            
+            print(f"✓ pygame playback started")            
+        except Exception as e:
+            print(f"Error in pygame playback: {e}")
+            self.is_playing = False
+            self.is_paused = False
+
+    def init_fluidsynth(self):
+        """Initialize FluidSynth for MIDI playback"""
+        try:
+            if not FLUIDSYNTH_AVAILABLE:
+                print("✗ FluidSynth not available")
+                self.fs = None
+                self.use_fluidsynth = False
+                return
+            
+            print("Initializing FluidSynth...")
+            
+            # Create FluidSynth settings first
+            self.fs_settings = fluidsynth.new_fluid_settings()
+            if self.fs_settings is None:
+                print("✗ Failed to create FluidSynth settings")
+                self.fs = None
+                self.use_fluidsynth = False
+                return
+            
+            # Create FluidSynth instance with settings
+            self.fs = fluidsynth.new_fluid_synth(self.fs_settings)
+            if self.fs is None:
+                print("✗ Failed to create FluidSynth synthesizer")
+                print("  This usually means FluidSynth binary is not installed")
+                print("  Install FluidSynth binary and try again")
+                fluidsynth.delete_fluid_settings(self.fs_settings)
+                self.fs_settings = None
+                self.use_fluidsynth = False
+                return
+            
+            # Create audio driver
+            self.audio_driver = fluidsynth.new_fluid_audio_driver(self.fs_settings, self.fs)
+            if self.audio_driver is None:
+                print("✗ Failed to create FluidSynth audio driver")
+                print("  Audio system may be busy or incompatible")
+                fluidsynth.delete_fluid_synth(self.fs)
+                fluidsynth.delete_fluid_settings(self.fs_settings)
+                self.fs = None
+                self.fs_settings = None
+                self.use_fluidsynth = False
+                return
+            
+            # Load a soundfont (required for FluidSynth)
+            # Try to find a default soundfont or use a basic one
+            soundfont_loaded = False
+            
+            # Common soundfont locations
+            soundfont_paths = [
+                "C:\\Windows\\System32\\drivers\\gm.dls",  # Windows default
+                "/usr/share/sounds/sf2/FluidR3_GM.sf2",   # Linux
+                "/System/Library/Components/CoreAudio.component/Contents/Resources/gs_instruments.dls"  # macOS
+            ]
+            
+            for sf_path in soundfont_paths:
+                if os.path.exists(sf_path):
+                    try:
+                        if fluidsynth.fluid_synth_sfload(self.fs, sf_path.encode(), 1) != fluidsynth.FLUID_FAILED:
+                            print(f"✓ Loaded soundfont: {sf_path}")
+                            soundfont_loaded = True
+                            break
+                    except Exception as sf_error:
+                        print(f"⚠ Could not load soundfont {sf_path}: {sf_error}")
+                        continue
+            
+            if not soundfont_loaded:
+                print("⚠ No soundfont found - FluidSynth may not produce sound")
+                print("  Consider installing FluidR3 soundfont or similar")
+                print("  FluidSynth will still work but may be silent")
+            
+            self.use_fluidsynth = True
+            print("✓ FluidSynth initialized successfully")
+              except Exception as e:
+            print(f"Error initializing FluidSynth: {e}")
+            print("  Falling back to pygame for MIDI playback")
+            self.fs = None
+            self.fs_settings = None
+            self.use_fluidsynth = False
+        """Stop MIDI playback and reset position"""
+        try:
+            if hasattr(self, 'use_fluidsynth') and self.use_fluidsynth and hasattr(self, 'fluidsynth_player'):
+                # Stop FluidSynth playback
+                if hasattr(self, 'fluidsynth_player') and self.fluidsynth_player:
+                    fluidsynth.fluid_player_stop(self.fluidsynth_player)
+                    fluidsynth.delete_fluid_player(self.fluidsynth_player)
+                    self.fluidsynth_player = None
+            else:
+                # Stop pygame playback
+                pygame.mixer.music.stop()
+            
+            self.is_playing = False
+            self.is_paused = False
+            self.playback_position = 0.0
+            self.playback_start_time = None
+            self.visual_position_offset = 0.0
+            
+            if self.playback_timer:
+                self.after_cancel(self.playback_timer)
+                self.playback_timer = None
+            
+            # Stop playback thread if running
+            if hasattr(self, 'playback_thread') and self.playback_thread and self.playback_thread.is_alive():
+                if hasattr(self, 'playback_stop_event'):
+                    self.playback_stop_event.set()
+                self.playback_thread.join(timeout=1.0)
+            
+            # Clean up any temporary MIDI files
+            self.cleanup_temp_files()
+            
+            # Reset button to play symbol when stopped
+            if hasattr(self, 'play_pause_button'):
+                self.play_pause_button.config(text='▶', bg='lightgreen')
+            
+            self.update_led_clock()
+            self.sync_scrollbar_to_midi_position()
+            self.update_keyboard_highlighting()  # Clear any highlighted keys
+            print("MIDI playback stopped")
+            
+        except Exception as e:
+            print(f"Error stopping MIDI: {e}")
 
     def destroy(self):
         """Clean up resources when closing the application"""
         try:
             # Stop any playing MIDI
             if self.is_playing:
-                if self.fluidsynth_ready and self.fs_player:
-                    fluidsynth.fluid_player_stop(self.fs_player)
+                if hasattr(self, 'use_fluidsynth') and self.use_fluidsynth:
+                    if hasattr(self, 'fluidsynth_player') and self.fluidsynth_player:
+                        fluidsynth.fluid_player_stop(self.fluidsynth_player)
+                        fluidsynth.delete_fluid_player(self.fluidsynth_player)
+                        self.fluidsynth_player = None
                 else:
                     pygame.mixer.music.stop()
             
             # Clean up FluidSynth resources
-            self.cleanup_fluidsynth()
+            if hasattr(self, 'audio_driver') and self.audio_driver:
+                fluidsynth.delete_fluid_audio_driver(self.audio_driver)
+                self.audio_driver = None
+            
+            if hasattr(self, 'fs') and self.fs:
+                fluidsynth.delete_fluid_synth(self.fs)
+                self.fs = None
+            
+            if hasattr(self, 'fs_settings') and self.fs_settings:
+                fluidsynth.delete_fluid_settings(self.fs_settings)
+                self.fs_settings = None
             
             # Clean up temporary files
             self.cleanup_temp_files()
