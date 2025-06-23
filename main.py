@@ -68,15 +68,23 @@ class MidiGapperGUI(tk.Tk):
     
     def __init__(self):
         super().__init__()
+        
+        # Enable debug timing output for troubleshooting
+        self.debug_timing = True
+        
         self.title('Python Midi Gapper 2')
         
         # Initialize MIDI playback systems
-        self.init_midi_playback()          # MIDI playback state
+        self.init_midi_playback()        # MIDI playback state
         self.playback_thread = None
         self.playback_stop_event = threading.Event()
         self.current_playback_file = None
         self.playback_start_time = None  # When audio playback actually started
-        self.visual_position_offset = 0.0  # Offset between visual and audio position
+        
+        # New unified timing variables for perfect synchronization
+        self.using_temp_file = False  # Whether we're using a temp file for seeking
+        self.audio_start_offset = 0.0  # The position offset for timing calculations
+        
         self.temp_midi_files = []  # Track temporary MIDI files for cleanup
         
         # Scrolling performance optimization for large MIDI files
@@ -1210,8 +1218,7 @@ class MidiGapperGUI(tk.Tk):
                         note_end = note_start + note_data.get('duration', 0)
                         if note_start <= audio_position <= note_end:
                             currently_playing_notes.add(note_data['note'])
-        
-        # Highlight currently playing notes
+          # Highlight currently playing notes
         for note in currently_playing_notes:
             if note in self.keyboard_keys:
                 key_id = self.keyboard_keys[note]
@@ -1225,30 +1232,23 @@ class MidiGapperGUI(tk.Tk):
                     self.keyboard_canvas.itemconfig(key_id, fill='#B0D0FF')
 
     def get_actual_audio_position(self):
-        """Calculate the actual audio playback position (corrected for pygame MIDI seeking limitation)"""
+        """Calculate the actual audio playback position with perfect timing synchronization"""
         if not self.is_playing or self.playback_start_time is None:
             # If not playing, use the visual position for manual seeking
             return self.playback_position
         
         # Calculate elapsed time since audio started
         elapsed_time = time.time() - self.playback_start_time
-          # Handle pygame MIDI seeking limitation
-        if self.visual_position_offset > 0.1:
-            # When seeking: audio starts from 0, but visual starts from offset
-            # Audio position is just the elapsed time since playback started
-            audio_position = elapsed_time
-            
-            # If audio hasn't caught up to where we seeked, return -1 to disable highlighting
-            if audio_position < self.visual_position_offset:
-                return -1  # Signal to disable highlighting until audio catches up
-            else:
-                # Audio has caught up, so use the normal calculation
-                audio_pos = self.visual_position_offset + elapsed_time
-                return audio_pos
-        else:
-            # Started from beginning, audio and visual are in sync
-            audio_pos = elapsed_time
-            return audio_pos
+        
+        # DEBUG: Print timing details
+        if hasattr(self, 'debug_timing') and self.debug_timing:
+            offset = getattr(self, 'audio_start_offset', 0)
+            using_temp = getattr(self, 'using_temp_file', False)
+            print(f"DEBUG TIMING: elapsed={elapsed_time:.3f}s, offset={offset:.3f}s, temp_file={using_temp}")
+        
+        # The playback_start_time is already adjusted for any offset during playback initialization
+        # So elapsed_time directly represents the current playback position
+        return elapsed_time
 
     def on_text_modified(self, event):
         # Reset modified flag
@@ -1846,7 +1846,12 @@ class MidiGapperGUI(tk.Tk):
             # Reset position to start
             self.playback_position = 0.0
             self.playback_start_time = None
-            self.visual_position_offset = 0.0
+            
+            # Clear timing state
+            if hasattr(self, 'using_temp_file'):
+                self.using_temp_file = False
+            if hasattr(self, 'audio_start_offset'):
+                self.audio_start_offset = 0.0
             
             # Update displays
             self.update_led_clock()
@@ -1900,7 +1905,8 @@ class MidiGapperGUI(tk.Tk):
                 # Change button to pause symbol
                 self.play_pause_button.config(text='⏸', bg='orange')
                 
-        except Exception as e:            print(f"Error toggling play/pause: {e}")
+        except Exception as e:
+            print(f"Error toggling play/pause: {e}")
 
     def resume_midi(self):
         """Resume MIDI playback from pause"""
@@ -1917,20 +1923,17 @@ class MidiGapperGUI(tk.Tk):
                     print(f"DEBUG: Position changed significantly, restarting playback from {self.playback_position:.2f}s")
                     # Stop current playback and restart from new position
                     pygame.mixer.music.stop()
-                    self.is_playing = False
+                    self.is_playing = False 
                     self.is_paused = False
                     self.start_midi_playback()
                 else:
-                    print(f"DEBUG: Position unchanged, resuming normally")
-                    pygame.mixer.music.unpause()
-                    
-                    self.is_playing = True
+                    print(f"DEBUG: Position unchanged, restarting from current position for perfect timing")
+                    # ALWAYS restart playback instead of unpause to ensure perfect timing
+                    # This eliminates the unpause delay/drift issue completely
+                    pygame.mixer.music.stop()
+                    self.is_playing = False
                     self.is_paused = False
-                    # Reset start time to account for the pause
-                    if self.playback_start_time:
-                        elapsed_before_pause = self.playback_position - self.visual_position_offset
-                        self.playback_start_time = time.time() - elapsed_before_pause
-                    self.update_playback_timer()
+                    self.start_midi_playback()
                     
                 print("MIDI playback resumed")
             except Exception as e:
@@ -1947,19 +1950,17 @@ class MidiGapperGUI(tk.Tk):
             return
             
         if self.is_paused:
-            # Resume from pause
+            # Resume from pause by restarting from current position
+            # This ensures perfect timing without unpause delays
             try:
-                pygame.mixer.music.unpause()
-                self.is_playing = True
+                print(f"DEBUG: Restarting from pause position {self.playback_position:.2f}s")
+                pygame.mixer.music.stop()
+                self.is_playing = False
                 self.is_paused = False
-                # Reset start time to account for the pause
-                if self.playback_start_time:
-                    elapsed_before_pause = self.playback_position - self.visual_position_offset
-                    self.playback_start_time = time.time() - elapsed_before_pause
-                self.update_playback_timer()
-                print("MIDI playback resumed")
+                self.start_midi_playback()
+                print("MIDI playback restarted from pause")
             except Exception as e:
-                print(f"Error resuming MIDI: {e}")
+                print(f"Error restarting from pause: {e}")
         else:
             # Start from beginning or current position
             self.start_midi_playback()
@@ -1970,7 +1971,6 @@ class MidiGapperGUI(tk.Tk):
         """Start MIDI playback from current position using pygame"""
         try:
             self._start_pygame_playback()
-                
         except Exception as e:
             print(f"Error starting MIDI playback: {e}")
             self.is_playing = False
@@ -1980,32 +1980,42 @@ class MidiGapperGUI(tk.Tk):
         """Start MIDI playback using pygame with real audio seeking support"""
         try:
             print(f"DEBUG: _start_pygame_playback called with playback_position: {self.playback_position:.2f}s")
-              # Ensure pygame mixer is initialized (in case it was not initialized properly)
+            
+            # Ensure pygame mixer is initialized (in case it was not initialized properly)
             if not pygame.mixer.get_init():
                 print("Reinitializing pygame mixer...")
                 pygame.mixer.pre_init(frequency=22050, size=-16, channels=2, buffer=1024)
                 pygame.mixer.init()
             
+            # Clear any previous timing state
+            self.using_temp_file = False
+            self.audio_start_offset = 0.0
+            
             # For seeking: create a temporary MIDI file starting from the seek position
-            if self.playback_position > 0.1:  # If we're seeking to a specific position
-                print(f"DEBUG: Position > 0.1s, creating temporary MIDI file starting from {self.playback_position:.2f}s...")
+            # Use temp file for any position > 0.05s to ensure perfect timing on resume
+            if self.playback_position > 0.05:  # Lowered threshold for better resume accuracy
+                print(f"DEBUG: Position > 0.05s, creating temporary MIDI file starting from {self.playback_position:.2f}s...")
                 midi_file_to_play = self.create_temp_midi_from_position(self.playback_position)
                 
                 # Check if temp file creation was successful
                 if midi_file_to_play and midi_file_to_play != self.current_midi_file and os.path.exists(midi_file_to_play):
-                    self.visual_position_offset = self.playback_position  # Track where we started
+                    # SUCCESS: Using temp file - audio starts at time 0, but represents our target position
+                    self.using_temp_file = True
+                    self.audio_start_offset = self.playback_position
                     print(f"DEBUG: ✓ Temp file created successfully: {midi_file_to_play}")
                     print(f"DEBUG: ✓ Audio seeking to {self.playback_position:.2f}s (real audio seek)")
                 else:
-                    # Fallback to original file if temp file creation failed
+                    # FALLBACK: Temp file creation failed, use original file
                     print(f"DEBUG: ✗ Temp file creation failed, falling back to original file (audio will start from beginning)")
                     midi_file_to_play = self.current_midi_file
-                    self.visual_position_offset = self.playback_position  # Keep visual offset for sync
+                    self.using_temp_file = False
+                    self.audio_start_offset = self.playback_position  # We want to show this position even though audio starts at 0
             else:
-                # Starting from beginning - use original file
-                print(f"DEBUG: Position <= 0.1s, using original file")
+                # Starting from very beginning - use original file
+                print(f"DEBUG: Position <= 0.05s, using original file")
                 midi_file_to_play = self.current_midi_file
-                self.visual_position_offset = 0.0
+                self.using_temp_file = False
+                self.audio_start_offset = 0.0
                 self.playback_position = 0.0
             
             print(f"DEBUG: Loading and playing MIDI file: {midi_file_to_play}")
@@ -2014,8 +2024,13 @@ class MidiGapperGUI(tk.Tk):
             pygame.mixer.music.load(midi_file_to_play)
             pygame.mixer.music.play()
             
-            # Record when audio playback actually started
-            self.playback_start_time = time.time()
+            # CRITICAL TIMING FIX: Set playback_start_time to account for audio offset
+            # This ensures get_actual_audio_position() returns the correct position
+            current_time = time.time()
+            self.playback_start_time = current_time - self.audio_start_offset
+            
+            print(f"DEBUG: Timing setup - offset: {self.audio_start_offset:.3f}s, using_temp: {self.using_temp_file}")
+            print(f"DEBUG: playback_start_time adjusted by {self.audio_start_offset:.3f}s for perfect sync")
             
             # Set playback state
             self.is_playing = True
@@ -2034,12 +2049,14 @@ class MidiGapperGUI(tk.Tk):
                 pygame.mixer.quit()
                 pygame.mixer.pre_init(frequency=22050, size=-16, channels=2, buffer=1024)
                 pygame.mixer.init()
-                  # Try playback again with original file if temp file failed
+                
+                # Try playback again with original file if temp file failed
                 midi_file_to_play = self.current_midi_file
                 pygame.mixer.music.load(midi_file_to_play)
                 pygame.mixer.music.play()
                 
-                self.playback_start_time = time.time()
+                # Adjust start time for current position
+                self.playback_start_time = time.time() - self.playback_position
                 self.is_playing = True
                 self.is_paused = False
                 self.update_playback_timer()
@@ -2247,12 +2264,14 @@ class MidiGapperGUI(tk.Tk):
                 self.is_paused = True
                 if self.playback_timer:
                     self.after_cancel(self.playback_timer)
-                    self.playback_timer = None
-                
-                # Update playback position to current audio position when paused
+                    self.playback_timer = None                # Update playback position to current audio position when paused
                 if self.playback_start_time:
                     elapsed = time.time() - self.playback_start_time
-                    self.playback_position = self.visual_position_offset + elapsed
+                    # Calculate absolute position based on whether we're using temp file or not
+                    if hasattr(self, 'visual_position_offset') and self.visual_position_offset > 0.1:
+                        self.playback_position = self.visual_position_offset + elapsed
+                    else:
+                        self.playback_position = elapsed
                 
                 # Update button to show play symbol when paused
                 self.play_pause_button.config(text='▶', bg='lightgreen')
@@ -2270,7 +2289,13 @@ class MidiGapperGUI(tk.Tk):
             self.is_paused = False
             self.playback_position = 0.0
             self.playback_start_time = None
-            self.visual_position_offset = 0.0
+            
+            # Clear timing state
+            if hasattr(self, 'using_temp_file'):
+                self.using_temp_file = False
+            if hasattr(self, 'audio_start_offset'):
+                self.audio_start_offset = 0.0
+                
             if self.playback_timer:
                 self.after_cancel(self.playback_timer)
                 self.playback_timer = None
@@ -2295,10 +2320,11 @@ class MidiGapperGUI(tk.Tk):
 
     def update_playback_timer(self):
         """Update playback position and schedule next update"""
-        if self.is_playing and not self.is_paused:            # Calculate accurate playback position based on elapsed time
+        if self.is_playing and not self.is_paused:
+            # Calculate accurate playback position using the unified timing approach
             if self.playback_start_time is not None:
-                elapsed_time = time.time() - self.playback_start_time
-                self.playback_position = self.visual_position_offset + elapsed_time
+                # Use the same logic as get_actual_audio_position()
+                self.playback_position = self.get_actual_audio_position()
             
             # Check if we've reached the end
             if hasattr(self, 'max_time') and self.playback_position >= self.max_time:
@@ -2504,11 +2530,13 @@ class MidiGapperGUI(tk.Tk):
         # Update playback position
         self.playback_position = new_position
         
-        # If currently playing, handle seeking
+        # If currently playing, restart playback from new position
+        # This ensures consistent timing regardless of seek distance
         if self.is_playing:
-            # Set visual offset for pygame seeking limitation
-            self.visual_position_offset = new_position
-            self.playback_start_time = time.time()
+            # Stop current playback and restart from new position
+            pygame.mixer.music.stop()
+            self.is_playing = False
+            self.start_midi_playback()
             
         # Update scrollbar to match new position
         self.sync_scrollbar_to_midi_position()
