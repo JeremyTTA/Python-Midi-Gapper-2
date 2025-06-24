@@ -11,12 +11,8 @@ import traceback
 from tkinter import messagebox
 from mido import MidiFile, MidiTrack
 import tkinter.font as tkfont
-import pygame
 import threading
 import time
-
-# MIDI playback using pygame
-print("Using pygame for MIDI playback with temp file seeking support")
 
 # Predefined distinct colors for channels
 DEFAULT_CHANNEL_COLORS = [    '#e6194b', '#3cb44b', '#ffe119', '#4363d8', '#f58231', '#911eb4',
@@ -62,6 +58,134 @@ def save_config(config):
     with open(CONFIG_FILE, 'w') as f:
         json.dump(config, f)
 
+class FluidSynthPlayer:
+    """MIDI note player using FluidSynth software synthesizer"""
+    def __init__(self, soundfont_path=None):
+        self.fs = None
+        self.midi_out = None  # Keep for compatibility with existing code
+        self.soundfont_path = soundfont_path
+        self.initialize_fluidsynth()
+    
+    def initialize_fluidsynth(self):
+        """Initialize FluidSynth with comprehensive diagnostics"""
+        print("\n=== FluidSynth Setup Diagnostics ===")
+        
+        try:
+            import fluidsynth
+            print("✓ FluidSynth imported successfully")
+            
+            # Create FluidSynth instance
+            self.fs = fluidsynth.Synth()
+            self.fs.start(driver="dsound")  # Use DirectSound on Windows
+            print("✓ FluidSynth synthesizer started")
+            
+            # Load a soundfont
+            soundfont_loaded = False
+            
+            # Try user-specified soundfont first
+            if self.soundfont_path and os.path.exists(self.soundfont_path):
+                try:
+                    sfid = self.fs.sfload(self.soundfont_path)
+                    self.fs.program_select(0, sfid, 0, 0)  # Channel 0, Bank 0, Preset 0
+                    print(f"✓ Loaded custom soundfont: {self.soundfont_path}")
+                    soundfont_loaded = True
+                except Exception as e:
+                    print(f"⚠ Failed to load custom soundfont: {e}")
+            
+            # Try common Windows soundfont locations
+            if not soundfont_loaded:
+                common_locations = [
+                    "C:/Windows/System32/drivers/gm.dls",
+                    "C:/Windows/SysWOW64/drivers/gm.dls",
+                    "default.sf2",  # FluidSynth might have a default
+                ]
+                
+                for location in common_locations:
+                    if os.path.exists(location):
+                        try:
+                            sfid = self.fs.sfload(location)
+                            self.fs.program_select(0, sfid, 0, 0)
+                            print(f"✓ Loaded soundfont: {location}")
+                            soundfont_loaded = True
+                            break
+                        except Exception as e:
+                            print(f"⚠ Failed to load {location}: {e}")
+            
+            if not soundfont_loaded:
+                print("⚠ No soundfont loaded - will use FluidSynth's built-in sounds")
+                # FluidSynth can still work without a soundfont using built-in samples
+            
+            # Set this as available for compatibility
+            self.midi_out = self  # Self-reference to indicate MIDI is available
+            
+            # Test with a quick note
+            try:
+                self.fs.noteon(0, 60, 30)  # Channel 0, Middle C, velocity 30
+                time.sleep(0.1)
+                self.fs.noteoff(0, 60)
+                print("✓ FluidSynth test note played successfully")
+            except Exception as test_e:
+                print(f"⚠ FluidSynth initialized but test failed: {test_e}")
+            
+            print("✓ FluidSynth MIDI playback ready!")
+                
+        except ImportError as e:
+            print(f"✗ FluidSynth import failed: {e}")
+            self._print_fluidsynth_setup_instructions()
+            self.fs = None
+            self.midi_out = None
+        except Exception as e:
+            print(f"✗ Failed to initialize FluidSynth: {e}")
+            self.fs = None
+            self.midi_out = None
+            
+        print("=====================================\n")
+    
+    def _print_fluidsynth_setup_instructions(self):
+        """Print FluidSynth installation instructions"""
+        print("\n📋 FluidSynth Setup Instructions:")
+        print("1. Install FluidSynth:")
+        print("   pip install pyfluidsynth")
+        print("")
+        print("2. Optional - Download a soundfont for better audio quality:")
+        print("   • Download a General MIDI soundfont (.sf2 file)")
+        print("   • Popular free soundfonts: FluidR3_GM.sf2, TimGM6mb.sf2")
+        print("   • Place in your project folder or specify path")
+        print("")
+        print("3. FluidSynth will work with built-in sounds even without a soundfont")
+        print("")
+        print("🔄 Restart the application after installing pyfluidsynth")
+        print("📖 The visualization will still work without MIDI audio")
+    
+    def _note_on(self, channel, note, velocity=64):
+        """Send a note-on message"""
+        if self.fs:
+            try:
+                self.fs.noteon(channel, note, velocity)
+            except Exception as e:
+                print(f"Error sending note_on: {e}")
+    
+    def _note_off(self, channel, note):
+        """Send a note-off message"""
+        if self.fs:
+            try:
+                self.fs.noteoff(channel, note)
+            except Exception as e:
+                print(f"Error sending note_off: {e}")
+    
+    def close(self):
+        """Close the FluidSynth synthesizer"""
+        if self.fs:
+            try:
+                self.fs.delete()
+            except:
+                pass
+            self.fs = None
+            self.midi_out = None
+
+# Keep the old MidiNotePlayer as an alias for backwards compatibility
+MidiNotePlayer = FluidSynthPlayer
+
 class MidiGapperGUI(tk.Tk):
     # Map MIDI note number to note name
     NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
@@ -73,19 +197,11 @@ class MidiGapperGUI(tk.Tk):
         self.debug_timing = True
         
         self.title('Python Midi Gapper 2')
+          # Initialize MIDI playback systems
+        self.init_midi_playback()
         
-        # Initialize MIDI playback systems
-        self.init_midi_playback()        # MIDI playback state
-        self.playback_thread = None
-        self.playback_stop_event = threading.Event()
-        self.current_playback_file = None
-        self.playback_start_time = None  # When audio playback actually started
-        
-        # New unified timing variables for perfect synchronization
-        self.using_temp_file = False  # Whether we're using a temp file for seeking
-        self.audio_start_offset = 0.0  # The position offset for timing calculations
-        
-        self.temp_midi_files = []  # Track temporary MIDI files for cleanup
+        # MIDI playback state
+        self.playback_start_time = None  # When playback actually started
         
         # Scrolling performance optimization for large MIDI files
         self.scroll_update_timer = None
@@ -151,19 +267,30 @@ class MidiGapperGUI(tk.Tk):
             self.state('zoomed')
             
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
+        # Force window to come to front
+        self.lift()
+        self.attributes('-topmost', True)
+        self.after(100, lambda: self.attributes('-topmost', False))
+        self.focus_force()
 
     def init_midi_playback(self):
-        """Initialize MIDI playback system using pygame"""
+        """Initialize MIDI playback system using note-based output"""
         self.midi_playback_available = False
         
-        # Initialize pygame for MIDI playback
+        # Initialize note-based MIDI player for highlighting-driven playback
         try:
-            pygame.mixer.pre_init(frequency=22050, size=-16, channels=2, buffer=1024)
-            pygame.mixer.init()
-            self.midi_playback_available = True
-            print("✓ Pygame mixer initialized for MIDI playback with temp file seeking support")
+            # Initialize without a specific device first, will be set later
+            self.note_player = MidiNotePlayer()
+            if self.note_player.midi_out:
+                self.midi_playback_available = True
+                print("✓ Note-based MIDI player initialized successfully")
+            else:
+                print("⚠ Note-based MIDI player available but no output device")
+                self.midi_playback_available = False
         except Exception as e:
-            print(f"⚠ Could not initialize pygame mixer: {e}")
+            print(f"⚠ Could not initialize note-based MIDI player: {e}")
+            self.note_player = None
             self.midi_playback_available = False
 
     def create_widgets(self):
@@ -246,9 +373,41 @@ class MidiGapperGUI(tk.Tk):
         self.is_paused = False
         self.playback_position = 0.0
         self.playback_timer = None
-        
-        # Draw initial LED display
+          # Draw initial LED display
         self.update_led_clock()
+        
+        # MIDI Output Device Selector (below play controls)
+        midi_device_frame = ttk.Frame(play_controls_frame)
+        midi_device_frame.pack(side='top', pady=(5, 5), anchor='w')
+        
+        # Device selector label
+        device_label = ttk.Label(midi_device_frame, text='MIDI Output:')
+        device_label.pack(side='top', anchor='w', pady=(0, 2))
+        
+        # Device selection frame with dropdown and status indicator
+        device_select_frame = ttk.Frame(midi_device_frame)
+        device_select_frame.pack(side='top', anchor='w')
+        
+        # MIDI output dropdown
+        self.midi_output_var = tk.StringVar()
+        self.midi_output_dropdown = ttk.Combobox(device_select_frame, textvariable=self.midi_output_var,
+                                                width=25, state='readonly')
+        self.midi_output_dropdown.pack(side='left', padx=(0, 5))
+        self.midi_output_dropdown.bind('<<ComboboxSelected>>', self.on_midi_output_changed)
+        
+        # Connection status indicator (green/red circle)
+        self.status_canvas = tk.Canvas(device_select_frame, width=16, height=16, bg=self.cget('bg'),
+                                      highlightthickness=0)
+        self.status_canvas.pack(side='left')
+        
+        # Refresh button to rescan MIDI devices
+        refresh_button = ttk.Button(device_select_frame, text='🔄', width=3,
+                                   command=self.refresh_midi_devices)
+        refresh_button.pack(side='left', padx=(5, 0))
+        
+        # Initialize MIDI device list and status
+        self.refresh_midi_devices()
+        
         # Center: MIDI info display
         info_frame = ttk.Frame(top_section)
         info_frame.pack(side='left', expand=True, fill='x', padx=(0, 10))
@@ -1121,8 +1280,7 @@ class MidiGapperGUI(tk.Tk):
                                 fill='#1a1a1a', outline='#333', width=1,
                                 tags=f'key_{next_note}'
                             )
-                            
-                            # Store black key reference for highlighting
+                              # Store black key reference for highlighting
                             self.keyboard_keys[next_note] = black_key_id
                 
                 white_key_x += white_key_width
@@ -1202,7 +1360,7 @@ class MidiGapperGUI(tk.Tk):
                                 # Check if note rectangle intersects with the blue line
                                 if (rect_top_y <= blue_line_y + highlight_tolerance and 
                                     rect_bottom_y >= blue_line_y - highlight_tolerance):
-                                    currently_playing_notes.add(note_data['note'])
+                                    currently_playing_notes.add((note_data['note'], note_data.get('channel', 0)))
                     except:
                         # If coordinate lookup fails, skip this note
                         continue
@@ -1217,9 +1375,15 @@ class MidiGapperGUI(tk.Tk):
                         note_start = note_data.get('start_time', 0)
                         note_end = note_start + note_data.get('duration', 0)
                         if note_start <= audio_position <= note_end:
-                            currently_playing_notes.add(note_data['note'])
-          # Highlight currently playing notes
-        for note in currently_playing_notes:
+                            currently_playing_notes.add((note_data['note'], note_data.get('channel', 0)))
+          
+        # Update MIDI playback based on highlighted notes
+        if self.is_playing and hasattr(self, 'note_player') and self.note_player.midi_out:
+            self._update_midi_notes_from_highlighting(currently_playing_notes)
+        
+        # Highlight currently playing notes (extract just the note numbers for display)
+        display_notes = {note for note, channel in currently_playing_notes}
+        for note in display_notes:
             if note in self.keyboard_keys:
                 key_id = self.keyboard_keys[note]
                 semitone = note % 12
@@ -1231,23 +1395,55 @@ class MidiGapperGUI(tk.Tk):
                     # Highlight white keys with light blue
                     self.keyboard_canvas.itemconfig(key_id, fill='#B0D0FF')
 
+    def _update_midi_notes_from_highlighting(self, currently_playing_notes):
+        """Update MIDI note playback based on currently highlighted notes"""
+        if not hasattr(self, 'active_midi_notes'):
+            self.active_midi_notes = set()
+        
+        # Get sets of (note, channel) tuples for comparison
+        new_notes = currently_playing_notes
+        active_notes = self.active_midi_notes
+          # Notes to turn OFF (were playing but no longer highlighted)
+        notes_to_stop = active_notes - new_notes
+        for note, channel in notes_to_stop:
+            if channel not in getattr(self, 'visible_channels', set()):
+                continue  # Skip invisible channels
+            try:
+                if hasattr(self, 'note_player') and self.note_player and self.note_player.midi_out:
+                    self.note_player._note_off(channel, note)
+            except:
+                pass
+        
+        # Notes to turn ON (newly highlighted)
+        notes_to_start = new_notes - active_notes
+        for note, channel in notes_to_start:
+            if channel not in getattr(self, 'visible_channels', set()):
+                continue  # Skip invisible channels
+            try:
+                # Get velocity from note data if available
+                velocity = 64  # Default velocity
+                for note_data in getattr(self, 'notes_for_visualization', []):
+                    if note_data.get('note') == note and note_data.get('channel') == channel:
+                        velocity = note_data.get('velocity', 64)
+                        break
+                
+                if hasattr(self, 'note_player') and self.note_player and self.note_player.midi_out:
+                    self.note_player._note_on(channel, note, velocity)
+            except:
+                pass
+        
+        # Update the active notes set
+        self.active_midi_notes = new_notes.copy()
+
     def get_actual_audio_position(self):
         """Calculate the actual audio playback position with perfect timing synchronization"""
         if not self.is_playing or self.playback_start_time is None:
             # If not playing, use the visual position for manual seeking
             return self.playback_position
-        
-        # Calculate elapsed time since audio started
+          # Calculate elapsed time since audio started
         elapsed_time = time.time() - self.playback_start_time
         
-        # DEBUG: Print timing details
-        if hasattr(self, 'debug_timing') and self.debug_timing:
-            offset = getattr(self, 'audio_start_offset', 0)
-            using_temp = getattr(self, 'using_temp_file', False)
-            print(f"DEBUG TIMING: elapsed={elapsed_time:.3f}s, offset={offset:.3f}s, temp_file={using_temp}")
-        
-        # The playback_start_time is already adjusted for any offset during playback initialization
-        # So elapsed_time directly represents the current playback position
+        # The playback_start_time represents the current playback position
         return elapsed_time
 
     def on_text_modified(self, event):
@@ -1264,17 +1460,19 @@ class MidiGapperGUI(tk.Tk):
                 try:
                     root = ET.fromstring(xml_str)
                     # Always rebuild visualization from the current XML
-                    # This ensures gaps and other modifications are reflected                    self.rebuild_notes_from_xml(root)
+                    # This ensures gaps and other modifications are reflected
+                    self.rebuild_notes_from_xml(root)
                 except Exception as e:
                     print(f"Error parsing XML for visualization: {e}")
                     return
 
     def on_closing(self):
-        # Clean up temporary MIDI files
-        self.cleanup_temp_files()
-        
         # Stop any ongoing playback
         self.stop_midi()
+        
+        # Clean up MIDI note player
+        if hasattr(self, 'note_player') and self.note_player:
+            self.note_player.close()
         
         # Save window geometry and state
         self.config_data['geometry'] = self.geometry()
@@ -1349,6 +1547,7 @@ class MidiGapperGUI(tk.Tk):
             # Otherwise, select only this channel and uncheck others
             for c, var in self.channel_vars.items():
                 if c == ch:
+
                     var.set(True)
                 else:
                     var.set(False)
@@ -1842,16 +2041,9 @@ class MidiGapperGUI(tk.Tk):
             # Stop current playback if playing
             if self.is_playing:
                 self.stop_midi()
-            
-            # Reset position to start
+              # Reset position to start
             self.playback_position = 0.0
             self.playback_start_time = None
-            
-            # Clear timing state
-            if hasattr(self, 'using_temp_file'):
-                self.using_temp_file = False
-            if hasattr(self, 'audio_start_offset'):
-                self.audio_start_offset = 0.0
             
             # Update displays
             self.update_led_clock()
@@ -1860,453 +2052,174 @@ class MidiGapperGUI(tk.Tk):
             
             print("Rewound to start")
             
-        except Exception as e:            print(f"Error rewinding to start: {e}")
+        except Exception as e:
+            print(f"Error rewinding to start: {e}")
 
     def toggle_play_pause(self):
-        """Toggle between play and pause with button symbol changes"""
+        """Toggle between play and pause using highlighting-driven playback"""
+        print("=== toggle_play_pause() called ===")
         try:
+            print(f"Current MIDI file: {getattr(self, 'current_midi_file', 'None')}")
+            print(f"Has note_player: {hasattr(self, 'note_player')}")
+            if hasattr(self, 'note_player'):
+                print(f"note_player.midi_out: {getattr(self.note_player, 'midi_out', 'None')}")
+            
             if not self.current_midi_file:
-                print("No MIDI file loaded")
+                print("❌ No MIDI file loaded")
                 return
                 
-            if not self.midi_playback_available:
-                print("MIDI playback not available")
-                return
+            if not hasattr(self, 'note_player') or not self.note_player.midi_out:
+                print("❌ Note-based MIDI playback not available")
+                print("⚠ Continuing anyway for testing (no audio will be heard)")
+                # Temporarily bypass MIDI output requirement for testing
+                # return
             
             # DEBUG: Print current playback position
-            print(f"DEBUG: Current playback_position before toggle: {self.playback_position:.2f}s")
+            print(f"Current playback_position: {self.playback_position:.2f}s")
             
             if self.is_playing:
                 # Currently playing, so pause
                 self.pause_midi()
-                # Change button to play symbol
-                self.play_pause_button.config(text='▶', bg='lightgreen')
             elif self.is_paused:
-                # Currently paused, check if position changed before resuming
-                print(f"DEBUG: Checking if position changed during pause")
-                
-                # For simplicity, if position > 0.1s, always restart to ensure seeking works
-                if self.playback_position > 0.1:
-                    print(f"DEBUG: Position > 0.1s during resume, restarting playback")
-                    # Stop and restart from new position
-                    pygame.mixer.music.stop()
-                    self.is_playing = False
-                    self.is_paused = False
-                    self.play_midi()
-                else:
-                    print(f"DEBUG: Position <= 0.1s, normal resume")
-                    self.resume_midi()
-                # Change button to pause symbol  
-                self.play_pause_button.config(text='⏸', bg='orange')
+                # Currently paused, so resume
+                self.play_midi()
             else:
                 # Not playing, so start
-                print(f"DEBUG: Starting playback from position: {self.playback_position:.2f}s")
+                print(f"Starting highlighting-driven playback from position: {self.playback_position:.2f}s")
                 self.play_midi()
-                # Change button to pause symbol
-                self.play_pause_button.config(text='⏸', bg='orange')
                 
         except Exception as e:
             print(f"Error toggling play/pause: {e}")
-
-    def resume_midi(self):
-        """Resume MIDI playback from pause"""
-        if self.is_paused:
-            try:
-                # Check if the playback position has changed significantly since we paused
-                # If so, we need to restart playback from the new position instead of just resuming
-                current_audio_pos = self.get_actual_audio_position()
-                position_changed = abs(self.playback_position - current_audio_pos) > 1.0  # 1 second tolerance
-                
-                print(f"DEBUG: Resume requested - current audio pos: {current_audio_pos:.2f}s, playback pos: {self.playback_position:.2f}s")
-                
-                if position_changed:
-                    print(f"DEBUG: Position changed significantly, restarting playback from {self.playback_position:.2f}s")
-                    # Stop current playback and restart from new position
-                    pygame.mixer.music.stop()
-                    self.is_playing = False 
-                    self.is_paused = False
-                    self.start_midi_playback()
-                else:
-                    print(f"DEBUG: Position unchanged, restarting from current position for perfect timing")
-                    # ALWAYS restart playback instead of unpause to ensure perfect timing
-                    # This eliminates the unpause delay/drift issue completely
-                    pygame.mixer.music.stop()
-                    self.is_playing = False
-                    self.is_paused = False
-                    self.start_midi_playback()
-                    
-                print("MIDI playback resumed")
-            except Exception as e:
-                print(f"Error resuming MIDI: {e}")
+            import traceback
+            traceback.print_exc()
 
     def play_midi(self):
-        """Start MIDI playback"""
-        if not self.current_midi_file:
-            print("No MIDI file loaded")
-            return
-            
-        if not self.midi_playback_available:
-            print("MIDI playback not available")
-            return
-            
-        if self.is_paused:
-            # Resume from pause by restarting from current position
-            # This ensures perfect timing without unpause delays
-            try:
-                print(f"DEBUG: Restarting from pause position {self.playback_position:.2f}s")
-                pygame.mixer.music.stop()
-                self.is_playing = False
-                self.is_paused = False
-                self.start_midi_playback()
-                print("MIDI playback restarted from pause")
-            except Exception as e:
-                print(f"Error restarting from pause: {e}")
-        else:
-            # Start from beginning or current position
-            self.start_midi_playback()
+        """Start highlighting-driven MIDI playback"""
+        print("=== play_midi() called ===")
         
-        print(f"MIDI playback started at position {self.playback_position:.2f}s")
-
-    def start_midi_playback(self):
-        """Start MIDI playback from current position using pygame"""
+        if not self.current_midi_file:
+            print("❌ No MIDI file loaded")
+            return
+            
+        print(f"✓ MIDI file loaded: {self.current_midi_file}")
+        
+        if not hasattr(self, 'note_player'):
+            print("❌ note_player not found")
+            return
+            
+        print(f"✓ note_player exists: {type(self.note_player)}")
+        
+        if not self.note_player.midi_out:
+            print("⚠ Note-based MIDI playback not available - no MIDI output device")
+            print("✓ Visualization playback will continue without audio")
+        else:
+            print(f"✓ MIDI output device available")
+            
+        print(f"✓ Notes loaded: {len(getattr(self, 'notes_for_visualization', []))}")
+        print(f"✓ Current position: {self.playback_position:.2f}s")
+        
         try:
-            self._start_pygame_playback()
-        except Exception as e:
-            print(f"Error starting MIDI playback: {e}")
-            self.is_playing = False
-            self.is_paused = False
-
-    def _start_pygame_playback(self):
-        """Start MIDI playback using pygame with real audio seeking support"""
-        try:
-            print(f"DEBUG: _start_pygame_playback called with playback_position: {self.playback_position:.2f}s")
+            # Initialize active notes tracking
+            if not hasattr(self, 'active_midi_notes'):
+                self.active_midi_notes = set()
             
-            # Ensure pygame mixer is initialized (in case it was not initialized properly)
-            if not pygame.mixer.get_init():
-                print("Reinitializing pygame mixer...")
-                pygame.mixer.pre_init(frequency=22050, size=-16, channels=2, buffer=1024)
-                pygame.mixer.init()
-            
-            # Clear any previous timing state
-            self.using_temp_file = False
-            self.audio_start_offset = 0.0
-            
-            # For seeking: create a temporary MIDI file starting from the seek position
-            # Use temp file for any position > 0.05s to ensure perfect timing on resume
-            if self.playback_position > 0.05:  # Lowered threshold for better resume accuracy
-                print(f"DEBUG: Position > 0.05s, creating temporary MIDI file starting from {self.playback_position:.2f}s...")
-                midi_file_to_play = self.create_temp_midi_from_position(self.playback_position)
-                
-                # Check if temp file creation was successful
-                if midi_file_to_play and midi_file_to_play != self.current_midi_file and os.path.exists(midi_file_to_play):
-                    # SUCCESS: Using temp file - audio starts at time 0, but represents our target position
-                    self.using_temp_file = True
-                    self.audio_start_offset = self.playback_position
-                    print(f"DEBUG: ✓ Temp file created successfully: {midi_file_to_play}")
-                    print(f"DEBUG: ✓ Audio seeking to {self.playback_position:.2f}s (real audio seek)")
-                else:
-                    # FALLBACK: Temp file creation failed, use original file
-                    print(f"DEBUG: ✗ Temp file creation failed, falling back to original file (audio will start from beginning)")
-                    midi_file_to_play = self.current_midi_file
-                    self.using_temp_file = False
-                    self.audio_start_offset = self.playback_position  # We want to show this position even though audio starts at 0
-            else:
-                # Starting from very beginning - use original file
-                print(f"DEBUG: Position <= 0.05s, using original file")
-                midi_file_to_play = self.current_midi_file
-                self.using_temp_file = False
-                self.audio_start_offset = 0.0
-                self.playback_position = 0.0
-            
-            print(f"DEBUG: Loading and playing MIDI file: {midi_file_to_play}")
-            
-            # Load and play the MIDI file
-            pygame.mixer.music.load(midi_file_to_play)
-            pygame.mixer.music.play()
-            
-            # CRITICAL TIMING FIX: Set playback_start_time to account for audio offset
-            # This ensures get_actual_audio_position() returns the correct position
-            current_time = time.time()
-            self.playback_start_time = current_time - self.audio_start_offset
-            
-            print(f"DEBUG: Timing setup - offset: {self.audio_start_offset:.3f}s, using_temp: {self.using_temp_file}")
-            print(f"DEBUG: playback_start_time adjusted by {self.audio_start_offset:.3f}s for perfect sync")
-            
-            # Set playback state
+            # Set timing state for highlighting-driven playback
+            self.playback_start_time = time.time() - self.playback_position
             self.is_playing = True
             self.is_paused = False
             
-            # Start the playback timer
+            print(f"✓ Highlighting-driven playback state updated: is_playing={self.is_playing}")
+              # Update button states
+            self.play_pause_button.config(text='⏸', bg='yellow')
+            print("✓ Button updated to pause symbol")
+            
+            # Start the playback timer - this will drive everything through highlighting
             self.update_playback_timer()
+            print("✓ Playback timer started")
             
-            print(f"DEBUG: ✓ Started pygame MIDI playback from {self.playback_position:.2f}s")
-            
-        except Exception as e:
-            print(f"Error starting pygame MIDI playback: {e}")
-            # If pygame fails, try to reinitialize it once more
-            try:
-                print("Attempting to reinitialize pygame mixer...")
-                pygame.mixer.quit()
-                pygame.mixer.pre_init(frequency=22050, size=-16, channels=2, buffer=1024)
-                pygame.mixer.init()
-                
-                # Try playback again with original file if temp file failed
-                midi_file_to_play = self.current_midi_file
-                pygame.mixer.music.load(midi_file_to_play)
-                pygame.mixer.music.play()
-                
-                # Adjust start time for current position
-                self.playback_start_time = time.time() - self.playback_position
-                self.is_playing = True
-                self.is_paused = False
-                self.update_playback_timer()
-                
-                print("Pygame mixer reinitialized and playback started")
-                
-            except Exception as e2:
-                print(f"Failed to reinitialize pygame mixer: {e2}")
-                raise
-
-    def _seconds_to_ticks(self, seconds):
-        """Convert seconds to MIDI ticks for seeking with proper tempo handling"""
-        try:
-            # Load the MIDI file to get timing information
-            midi_file = mido.MidiFile(self.current_midi_file)
-            ticks_per_beat = midi_file.ticks_per_beat
-            
-            # Build a timeline of tempo changes
-            tempo_changes = []
-            current_tempo = 500000  # Default tempo (120 BPM in microseconds per beat)
-            
-            for track in midi_file.tracks:
-                current_time = 0
-                for msg in track:
-                    current_time += msg.time
-                    if msg.type == 'set_tempo':
-                        # Convert ticks to seconds at current tempo, then store new tempo
-                        time_seconds = mido.tick2second(current_time, ticks_per_beat, current_tempo)
-                        tempo_changes.append((time_seconds, msg.tempo))
-                        current_tempo = msg.tempo
-            
-            # Sort tempo changes by time
-            tempo_changes.sort()
-            
-            # If no tempo changes found, use default
-            if not tempo_changes:
-                tempo_changes = [(0.0, current_tempo)]
-            
-            # Convert seconds to ticks using tempo timeline
-            target_seconds = seconds
-            accumulated_ticks = 0
-            prev_time = 0.0
-            current_tempo = tempo_changes[0][1]
-            
-            for change_time, new_tempo in tempo_changes:
-                if target_seconds <= change_time:
-                    # Target time is before this tempo change
-                    break
-                
-                # Add ticks for the time interval at current tempo
-                interval_seconds = change_time - prev_time
-                interval_ticks = mido.second2tick(interval_seconds, ticks_per_beat, current_tempo)
-                accumulated_ticks += interval_ticks
-                
-                prev_time = change_time
-                current_tempo = new_tempo
-            
-            # Add remaining time at final tempo
-            remaining_seconds = target_seconds - prev_time
-            if remaining_seconds > 0:
-                remaining_ticks = mido.second2tick(remaining_seconds, ticks_per_beat, current_tempo)
-                accumulated_ticks += remaining_ticks
-            
-            print(f"DEBUG: Converted {seconds:.2f}s to {int(accumulated_ticks)} ticks using tempo timeline")
-            return int(accumulated_ticks)
+            print(f"✓ Highlighting-driven MIDI playback started at position {self.playback_position:.2f}s")
             
         except Exception as e:
-            print(f"Error converting seconds to ticks: {e}")
-            # Fallback calculation
-            return int(seconds * 480)  # 480 is a common ticks_per_beat value
-    
-    def create_temp_midi_from_position(self, start_time_seconds):
-        """Create a temporary MIDI file starting from the specified time position"""
-        try:
-            print(f"DEBUG: Creating temp MIDI file from {start_time_seconds:.2f}s")
-            import tempfile
-            import copy
-            
-            if not hasattr(self, 'temp_midi_files'):
-                self.temp_midi_files = []
-            
-            # Create temporary file
-            temp_fd, temp_path = tempfile.mkstemp(suffix='.mid', prefix='midi_seek_')
-            os.close(temp_fd)  # Close the file descriptor, we'll write with mido
-            
-            # Keep track of temp files for cleanup
-            self.temp_midi_files.append(temp_path)
-            
-            print(f"DEBUG: Creating temporary MIDI file: {temp_path}")
-            
-            # Load the original MIDI file
-            original_midi = mido.MidiFile(self.current_midi_file)
-            print(f"DEBUG: Loaded original MIDI: {len(original_midi.tracks)} tracks, ticks_per_beat: {original_midi.ticks_per_beat}")
-            
-            # Create new MIDI file with same properties
-            new_midi = mido.MidiFile(
-                type=original_midi.type,
-                ticks_per_beat=original_midi.ticks_per_beat
-            )
-              # Convert start time to ticks
-            start_ticks = self._seconds_to_ticks(start_time_seconds)
-            print(f"DEBUG: Start time {start_time_seconds:.2f}s = {start_ticks} ticks")
-            
-            # Find the tempo that should be active at the start position
-            active_tempo = 500000  # Default tempo (120 BPM)
-            for track in original_midi.tracks:
-                current_time = 0
-                for msg in track:
-                    current_time += msg.time
-                    if msg.type == 'set_tempo' and current_time <= start_ticks:
-                        active_tempo = msg.tempo
-                    elif current_time > start_ticks:
-                        break
-            
-            print(f"DEBUG: Active tempo at start position: {active_tempo} μs/beat ({mido.tempo2bpm(active_tempo):.1f} BPM)")
-            
-            # Process each track
-            tracks_processed = 0
-            for track_idx, original_track in enumerate(original_midi.tracks):
-                new_track = mido.MidiTrack()
-                new_track.name = original_track.name
-                
-                # For the first track (usually contains tempo), add the active tempo at the start
-                if track_idx == 0:
-                    # Add tempo event at the beginning of the temp file
-                    tempo_msg = mido.MetaMessage('set_tempo', tempo=active_tempo, time=0)
-                    new_track.append(tempo_msg)
-                    print(f"DEBUG: Added tempo event to temp file: {mido.tempo2bpm(active_tempo):.1f} BPM")
-                
-                # Convert track messages to absolute time, filter, then back to delta time
-                absolute_messages = []
-                current_time = 0
-                
-                # Convert to absolute time and filter messages
-                for msg in original_track:
-                    current_time += msg.time
-                    if current_time >= start_ticks:
-                        # Calculate the adjusted time (relative to start position)
-                        adjusted_time = current_time - start_ticks
-                        
-                        # Skip tempo events that are duplicates of our initial tempo
-                        if msg.type == 'set_tempo' and adjusted_time == 0 and msg.tempo == active_tempo:
-                            continue
-                        
-                        absolute_messages.append((adjusted_time, msg.copy()))
-                
-                # Convert back to delta time
-                prev_time = 0
-                if track_idx == 0:
-                    # Account for the tempo message we added at the beginning
-                    prev_time = 0
-                
-                for abs_time, msg in absolute_messages:
-                    delta_time = abs_time - prev_time
-                    new_msg = msg.copy()
-                    new_msg.time = delta_time
-                    new_track.append(new_msg)
-                    prev_time = abs_time
-                
-                # Ensure track has an end_of_track message
-                if new_track and new_track[-1].type != 'end_of_track':
-                    new_track.append(mido.MetaMessage('end_of_track', time=0))
-                elif not new_track:
-                    # Empty track, add end_of_track
-                    new_track.append(mido.MetaMessage('end_of_track', time=0))
-                
-                new_midi.tracks.append(new_track)
-                tracks_processed += 1
-                print(f"DEBUG: Processed track {track_idx}: {len(original_track)} -> {len(new_track)} messages")
-            
-            # Save the temporary MIDI file
-            new_midi.save(temp_path)
-            file_size = os.path.getsize(temp_path)
-            print(f"DEBUG: ✓ Saved temporary MIDI file starting from {start_time_seconds:.2f}s")
-            print(f"DEBUG: ✓ Temp file size: {file_size} bytes, processed {tracks_processed} tracks")
-            
-            return temp_path
-            
-        except Exception as e:
-            print(f"DEBUG: ✗ Error creating temporary MIDI file: {e}")
+            print(f"❌ Error in play_midi(): {e}")
             import traceback
             traceback.print_exc()
-            # Return original file as fallback
-            print(f"DEBUG: ✗ Returning original file as fallback")
-            return self.current_midi_file
 
-    def cleanup_temp_files(self):
-        """Clean up temporary MIDI files"""
-        if hasattr(self, 'temp_midi_files'):
-            for temp_file in self.temp_midi_files:
-                try:
-                    if os.path.exists(temp_file):
-                        os.unlink(temp_file)
-                except Exception as e:
-                    print(f"Warning: Could not delete temp file {temp_file}: {e}")
-            self.temp_midi_files = []
+    def start_midi_playback(self):
+        """Start highlighting-driven MIDI playback"""
+        self.play_midi()
 
     def pause_midi(self):
-        """Pause MIDI playback"""
+        """Pause highlighting-driven MIDI playback"""
         if self.is_playing:
             try:
-                pygame.mixer.music.pause()
+                # Stop all currently playing MIDI notes
+                if hasattr(self, 'active_midi_notes') and hasattr(self, 'note_player') and self.note_player.midi_out:
+                    for note, channel in self.active_midi_notes:
+                        try:
+                            self.note_player._note_off(channel, note)
+                        except:
+                            pass
+                    self.active_midi_notes.clear()
                 
                 self.is_playing = False
                 self.is_paused = True
+                
                 if self.playback_timer:
                     self.after_cancel(self.playback_timer)
-                    self.playback_timer = None                # Update playback position to current audio position when paused
+                    self.playback_timer = None
+                
+                # Update playback position to current position when paused
+                # Update playback position to current position when paused
                 if self.playback_start_time:
-                    elapsed = time.time() - self.playback_start_time
-                    # Calculate absolute position based on whether we're using temp file or not
-                    if hasattr(self, 'visual_position_offset') and self.visual_position_offset > 0.1:
-                        self.playback_position = self.visual_position_offset + elapsed
-                    else:
-                        self.playback_position = elapsed
+                    self.playback_position = time.time() - self.playback_start_time
                 
                 # Update button to show play symbol when paused
                 self.play_pause_button.config(text='▶', bg='lightgreen')
                 
-                print("MIDI playback paused")
+                print(f"✓ Highlighting-driven MIDI playback paused at {self.playback_position:.2f}s")
             except Exception as e:
                 print(f"Error pausing MIDI: {e}")
 
     def stop_midi(self):
-        """Stop MIDI playback and reset position"""
+        """Stop highlighting-driven MIDI playback and reset position"""
         try:
-            pygame.mixer.music.stop()
+            # Stop all currently playing MIDI notes
+            if hasattr(self, 'active_midi_notes') and hasattr(self, 'note_player') and self.note_player.midi_out:
+                for note, channel in self.active_midi_notes:
+                    try:
+                        self.note_player._note_off(channel, note)
+                    except:
+                        pass
+                self.active_midi_notes.clear()
                 
             self.is_playing = False
             self.is_paused = False
             self.playback_position = 0.0
             self.playback_start_time = None
-            
-            # Clear timing state
-            if hasattr(self, 'using_temp_file'):
-                self.using_temp_file = False
-            if hasattr(self, 'audio_start_offset'):
-                self.audio_start_offset = 0.0
                 
             if self.playback_timer:
                 self.after_cancel(self.playback_timer)
                 self.playback_timer = None
             
-            # Stop playback thread if running
+            # Reset button to play symbol when stopped
+            self.play_pause_button.config(text='▶', bg='lightgreen')
+            
+            self.update_led_clock()
+            self.sync_scrollbar_to_midi_position()
+            self.update_keyboard_highlighting()  # Clear any highlighted keys
+            print("✓ Highlighting-driven MIDI playback stopped")
+        except Exception as e:
+            print(f"Error stopping MIDI: {e}")
+            self.playback_position = 0.0
+            self.playback_start_time = None
+                
+            if self.playback_timer:
+                self.after_cancel(self.playback_timer)
+                self.playback_timer = None
+              # Stop playback thread if running
             if self.playback_thread and self.playback_thread.is_alive():
                 self.playback_stop_event.set()
                 self.playback_thread.join(timeout=1.0)
-            
-            # Clean up any temporary MIDI files
-            self.cleanup_temp_files()
             
             # Reset button to play symbol when stopped
             self.play_pause_button.config(text='▶', bg='lightgreen')
@@ -2529,13 +2442,11 @@ class MidiGapperGUI(tk.Tk):
         
         # Update playback position
         self.playback_position = new_position
-        
-        # If currently playing, restart playback from new position
+          # If currently playing, restart playback from new position
         # This ensures consistent timing regardless of seek distance
         if self.is_playing:
             # Stop current playback and restart from new position
-            pygame.mixer.music.stop()
-            self.is_playing = False
+            self.stop_midi()
             self.start_midi_playback()
             
         # Update scrollbar to match new position
@@ -2543,19 +2454,12 @@ class MidiGapperGUI(tk.Tk):
         
         # Update LED clock
         self.update_led_clock()
-        
-        # Update keyboard highlighting
-        self.update_keyboard_highlighting()
-
-    def destroy(self):
+          # Update keyboard highlighting        self.update_keyboard_highlighting()    def destroy(self):
         """Clean up resources when closing the application"""
         try:
             # Stop any playing MIDI
             if self.is_playing:
-                pygame.mixer.music.stop()
-            
-            # Clean up temporary files
-            self.cleanup_temp_files()
+                self.stop_midi()
             
             # Save window geometry
             geometry = self.geometry()
@@ -2566,10 +2470,123 @@ class MidiGapperGUI(tk.Tk):
             
         except Exception as e:
             print(f"Warning: Error during cleanup: {e}")
-        
+            
         # Call parent destroy
         super().destroy()
+        
+    def refresh_midi_devices(self):
+        """Refresh FluidSynth availability and setup"""
+        try:
+            # Try to import fluidsynth to check if it's available
+            try:
+                import fluidsynth
+                fluidsynth_available = True
+            except ImportError:
+                fluidsynth_available = False
+            
+            if not fluidsynth_available:
+                print("⚠ pyfluidsynth not installed. MIDI output will not be available.")
+                print("ℹ To install: pip install pyfluidsynth")
+                print("ℹ FluidSynth provides software MIDI synthesis - no external devices needed!")
+                self.midi_output_dropdown['values'] = ['FluidSynth not installed - see console for help']
+                self.midi_output_var.set('FluidSynth not installed - see console for help')
+                self.update_midi_status_indicator()
+                return
+              # FluidSynth is available - it's always a single "device"
+            output_names = ['FluidSynth Software Synthesizer']
+            
+            print("✓ FluidSynth available - software MIDI synthesis ready")
+            print("ℹ FluidSynth provides built-in piano sounds with no external setup required")
+            
+            # Update dropdown values
+            self.midi_output_dropdown['values'] = output_names
+            self.midi_output_var.set(output_names[0])
+            print(f"✓ MIDI output: {output_names[0]}")
+                    
+            # Automatically connect to FluidSynth
+            self.on_midi_output_changed()
+            
+            # Update connection status
+            self.update_midi_status_indicator()
+            
+        except Exception as e:
+            print(f"Error checking FluidSynth availability: {e}")
+            self.midi_output_dropdown['values'] = ['Error checking FluidSynth - see console']
+            self.midi_output_var.set('Error checking FluidSynth - see console')
+            self.update_midi_status_indicator()
+    
+    def on_midi_output_changed(self, event=None):
+        """Handle FluidSynth connection"""
+        selected_device = self.midi_output_var.get()
+        
+        if 'not installed' in selected_device or 'Error' in selected_device:
+            return
+            
+        print(f"Initializing FluidSynth: {selected_device}")
+        
+        # Save selected device to config
+        self.config_data['last_midi_output'] = selected_device
+        save_config(self.config_data)
+        
+        # Initialize FluidSynth player
+        try:
+            if hasattr(self, 'note_player') and self.note_player:
+                self.note_player.close()
+            
+            # Create new FluidSynth player (no device parameter needed)
+            self.note_player = FluidSynthPlayer()
+            
+            if self.note_player.midi_out:  # This means FluidSynth initialized successfully
+                self.midi_playback_available = True
+                print(f"✓ FluidSynth ready for MIDI playback")
+            else:
+                self.midi_playback_available = False
+                print(f"⚠ Failed to initialize FluidSynth")
+                
+        except Exception as e:
+            print(f"Error initializing FluidSynth: {e}")
+            self.midi_playback_available = False
+            
+        # Update status indicator
+        self.update_midi_status_indicator()
+    
+    def update_midi_status_indicator(self):
+        """Update the connection status indicator (green/red circle)"""
+        self.status_canvas.delete('all')
+        
+        # Determine connection status
+        is_connected = (hasattr(self, 'note_player') and 
+                       self.note_player and 
+                       self.note_player.midi_out is not None)
+        
+        # Draw status circle
+        color = '#00aa00' if is_connected else '#aa0000'  # Green if connected, red if not
+        self.status_canvas.create_oval(2, 2, 14, 14, fill=color, outline='#333333')
+        
+        # Create tooltip information
+        if is_connected:
+            device_name = getattr(self.note_player.midi_out, 'name', 'Unknown Device')
+            tooltip_text = f"Connected to: {device_name}"
+        else:
+            tooltip_text = "Not connected - select a MIDI device"
+            
+        # Simple status display on click
+        def show_status():
+            print(f"MIDI Status: {tooltip_text}")
+            
+        self.status_canvas.bind('<Button-1>', lambda e: show_status())
 
-if __name__ == '__main__':
-    app = MidiGapperGUI()
-    app.mainloop()
+
+if __name__ == "__main__":
+    print("Starting Python Midi Gapper 2...")
+    try:
+        print("Creating MidiGapperGUI instance...")
+        app = MidiGapperGUI()
+        print("Starting main loop...")
+        app.mainloop()
+        print("Main loop exited.")
+    except Exception as e:
+        print(f"Error starting application: {e}")
+        import traceback
+        traceback.print_exc()
+        input("Press Enter to exit...")
