@@ -629,78 +629,59 @@ class MidiGapperGUI(tk.Tk):
         self.visible_channels = set(channels)
         self.update_channel_legend()
         
-        # FIXED: Process all tracks with global tempo handling
+        # SIMPLIFIED: Use mido's built-in message iteration with proper timing
         self.notes_for_visualization = []
         
-        # First pass: collect all tempo changes with global timing
+        # Create a tempo map using mido's built-in functionality
         tempo_changes = []
-        global_time = 0.0
-        current_tempo = 500000  # Default tempo
+        active_on = {}
         
-        # Process all tracks to find tempo changes
-        for track in mf.tracks:
-            track_time = 0.0
-            for msg in track:
-                delta = mido.tick2second(msg.time, mf.ticks_per_beat, current_tempo)
-                track_time += delta
-                global_time = max(global_time, track_time)
-                
-                if msg.is_meta and msg.type == 'set_tempo':
-                    tempo_changes.append({
-                        'time': track_time,
-                        'tempo': msg.tempo
-                    })
-                    current_tempo = msg.tempo  # Update current tempo
-        
-        # Sort tempo changes by time
-        tempo_changes.sort(key=lambda x: x['time'])
-        
-        # Function to get tempo at specific time
-        def get_tempo_at_time(time):
-            tempo = 500000  # Default
-            for change in tempo_changes:
-                if change['time'] <= time:
-                    tempo = change['tempo']
-                else:
-                    break
-            return tempo
-        
-        # Second pass: process notes with correct tempo handling
-        for i, track in enumerate(mf.tracks):
-            print(f"Processing track {i}: {len(track)} messages")
-            abs_time = 0.0
-            active_on = {}
+        # Use mido.MidiFile iteration with proper absolute time calculation
+        abs_time = 0.0  # Track absolute time by accumulating deltas
+        for msg in mf:
+            abs_time += msg.time  # Accumulate delta time to get absolute time
             
-            for msg in track:
-                # Get current tempo for this time point
-                current_tempo = get_tempo_at_time(abs_time)
-                
-                # Calculate delta time with correct tempo
-                delta = mido.tick2second(msg.time, mf.ticks_per_beat, current_tempo)
-                abs_time += delta
-                
-                # Handle note events
+            if msg.is_meta and msg.type == 'set_tempo':
+                tempo_changes.append((abs_time, msg.tempo))
+            elif hasattr(msg, 'channel') and hasattr(msg, 'note'):
                 if msg.type == 'note_on' and getattr(msg, 'velocity', 0) > 0:
-                    active_on[(msg.channel, msg.note)] = abs_time
+                    active_on[(msg.channel, msg.note)] = {
+                        'start_time': abs_time,
+                        'velocity': msg.velocity
+                    }
                 elif msg.type == 'note_off' or (msg.type == 'note_on' and getattr(msg, 'velocity', 0) == 0):
-                    key = (getattr(msg, 'channel', None), getattr(msg, 'note', None))
+                    key = (msg.channel, msg.note)
                     if key in active_on:
-                        start_time = active_on.pop(key)
+                        note_info = active_on.pop(key)
+                        start_time = note_info['start_time']
                         duration = abs_time - start_time
                         self.notes_for_visualization.append({
-                            'start_time': start_time, 
-                            'note': key[1], 
-                            'channel': key[0], 
-                            'duration': duration
+                            'start_time': start_time,
+                            'note': key[1],
+                            'channel': key[0],
+                            'duration': duration,
+                            'velocity': note_info['velocity']
                         })
+        
+        # Store tempo changes for playback
+        self.tempo_changes = tempo_changes if tempo_changes else [(0.0, 500000)]
+        
+        print(f"Processed {len(self.notes_for_visualization)} notes")
+        print(f"Found {len(tempo_changes)} tempo changes:")
+        for time, tempo in tempo_changes:
+            bpm = int(60000000 / tempo)
+            print(f"  Time {time:.2f}s: {bpm} BPM")
+        print(f"Total MIDI duration: {abs_time:.3f} seconds")
         
         # Build XML for display (using simplified approach)
         root = ET.Element('MidiFile', ticks_per_beat=str(mf.ticks_per_beat))
+        abs_time_xml = 0.0  # Reset for XML generation
         for i, track in enumerate(mf.tracks):
             tr_elem = ET.SubElement(root, 'Track', name=track.name or f'Track_{i}')
             for msg in track:
+                abs_time_xml += msg.time
                 attrs = msg.dict()
-                msg_elem = ET.SubElement(tr_elem, 'Message', type=msg.type, time=str(msg.time))
+                msg_elem = ET.SubElement(tr_elem, 'Message', type=msg.type, time=str(abs_time_xml))
                 for attr, value in attrs.items():
                     if attr not in ('type', 'time'):
                         msg_elem.set(attr, str(value))
@@ -720,7 +701,12 @@ class MidiGapperGUI(tk.Tk):
         
         # Populate visualization notes from processed MIDI data
         self.notes = [(d['start_time'], d['note'], d['channel'], d['duration']) for d in self.notes_for_visualization]
-        self.max_time = max((d['start_time'] + d['duration'] for d in self.notes_for_visualization), default=1)# Update the MIDI info labels with detailed information
+        
+        # Calculate max_time as the maximum of last note end time and total MIDI duration
+        notes_max_time = max((d['start_time'] + d['duration'] for d in self.notes_for_visualization), default=0)
+        self.max_time = max(notes_max_time, abs_time)
+        
+        print(f"Notes max time: {notes_max_time:.3f}s, MIDI duration: {abs_time:.3f}s, Using: {self.max_time:.3f}s")# Update the MIDI info labels with detailed information
         fname = os.path.basename(file_path)
         
         # Get MIDI format type (0, 1, or 2)
@@ -729,10 +715,11 @@ class MidiGapperGUI(tk.Tk):
         # Get ticks per beat
         ticks_per_beat = getattr(mf, 'ticks_per_beat', 'Unknown')
         
-        # Calculate total duration in minutes:seconds
+        # Calculate total duration in minutes:seconds.milliseconds for precision
         duration_minutes = int(self.max_time // 60)
         duration_seconds = int(self.max_time % 60)
-        duration_str = f"{duration_minutes}:{duration_seconds:02d}"
+        duration_milliseconds = int((self.max_time % 1) * 1000)
+        duration_str = f"{duration_minutes}:{duration_seconds:02d}.{duration_milliseconds:03d}"
           # Get tempo information
         tempos_us = [msg.tempo for track in mf.tracks for msg in track if msg.is_meta and msg.type == 'set_tempo']
         if not tempos_us:
